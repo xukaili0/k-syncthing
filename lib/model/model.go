@@ -58,6 +58,8 @@ type service interface {
 	DelayScan(d time.Duration)
 	ScheduleScan()
 	SchedulePull()                                    // something relevant changed, we should try a pull
+	TriggerPull()                                     // explicit user action, bypasses manual sync suppression
+	TriggerPullSelected(files []string)               // explicit user action for selected files
 	Jobs(page, perpage int) ([]string, []string, int) // In progress, Queued, skipped
 	Scan(subs []string) error
 	Errors() []FileError
@@ -109,7 +111,10 @@ type Model interface {
 	NeedFolderFiles(folder string, page, perpage int) ([]protocol.FileInfo, []protocol.FileInfo, []protocol.FileInfo, error)
 	RemoteNeedFolderFiles(folder string, device protocol.DeviceID, page, perpage int) ([]protocol.FileInfo, error)
 	LocalChangedFolderFiles(folder string, page, perpage int) ([]protocol.FileInfo, error)
+	CompareFolderFiles(folder string, device protocol.DeviceID, opts CompareOptions) (CompareResult, error)
 	FolderProgressBytesCompleted(folder string) int64
+	TriggerFolderPull(folder string) error
+	TriggerFolderPullSelected(folder string, files []string) error
 
 	CurrentFolderFile(folder string, file string) (protocol.FileInfo, bool, error)
 	CurrentGlobalFile(folder string, file string) (protocol.FileInfo, bool, error)
@@ -1120,6 +1125,46 @@ func (m *model) LocalChangedFolderFiles(folder string, page, perpage int) ([]pro
 	}
 
 	return files, nil
+}
+
+func (m *model) TriggerFolderPull(folder string) error {
+	m.mut.RLock()
+	runner, runnerOK := m.folderRunners.Get(folder)
+	cfg, cfgOK := m.folderCfgs[folder]
+	m.mut.RUnlock()
+
+	if !cfgOK {
+		return ErrFolderMissing
+	}
+	if cfg.Paused {
+		return ErrFolderPaused
+	}
+	if !runnerOK {
+		return ErrFolderNotRunning
+	}
+
+	runner.TriggerPull()
+	return nil
+}
+
+func (m *model) TriggerFolderPullSelected(folder string, files []string) error {
+	m.mut.RLock()
+	runner, runnerOK := m.folderRunners.Get(folder)
+	cfg, cfgOK := m.folderCfgs[folder]
+	m.mut.RUnlock()
+
+	if !cfgOK {
+		return ErrFolderMissing
+	}
+	if cfg.Paused {
+		return ErrFolderPaused
+	}
+	if !runnerOK {
+		return ErrFolderNotRunning
+	}
+
+	runner.TriggerPullSelected(files)
+	return nil
 }
 
 type pager struct {

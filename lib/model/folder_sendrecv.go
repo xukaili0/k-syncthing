@@ -129,6 +129,8 @@ type sendReceiveFolder struct {
 	queue              *jobQueue
 	blockPullReorderer blockPullReorderer
 	writeLimiter       *semaphore.Semaphore
+	selectionMut       sync.Mutex
+	manualSelection    map[string]struct{}
 
 	tempPullErrors map[string]string // pull errors that might be just transient
 }
@@ -310,6 +312,7 @@ func (f *sendReceiveFolder) processNeeded(ctx context.Context, dbUpdateChan chan
 	var dirDeletions []protocol.FileInfo
 	fileDeletions := map[string]protocol.FileInfo{}
 	buckets := map[string][]protocol.FileInfo{}
+	selected := f.consumeManualSelection()
 
 	// Iterate the list of items that we need and sort them into piles.
 	// Regular files to pull goes into the file queue, everything else
@@ -324,6 +327,11 @@ loop:
 		case <-ctx.Done():
 			break loop
 		default:
+		}
+		if len(selected) > 0 {
+			if _, ok := selected[file.Name]; !ok {
+				continue
+			}
 		}
 
 		if f.IgnoreDelete && file.IsDeleted() {
@@ -505,6 +513,28 @@ nextFile:
 	}
 
 	return fileDeletions, dirDeletions, nil
+}
+
+func (f *sendReceiveFolder) TriggerPullSelected(files []string) {
+	f.selectionMut.Lock()
+	if len(files) == 0 {
+		f.manualSelection = nil
+	} else {
+		f.manualSelection = make(map[string]struct{}, len(files))
+		for _, file := range files {
+			f.manualSelection[file] = struct{}{}
+		}
+	}
+	f.selectionMut.Unlock()
+	f.TriggerPull()
+}
+
+func (f *sendReceiveFolder) consumeManualSelection() map[string]struct{} {
+	f.selectionMut.Lock()
+	defer f.selectionMut.Unlock()
+	selected := f.manualSelection
+	f.manualSelection = nil
+	return selected
 }
 
 func popCandidate(buckets map[string][]protocol.FileInfo, key string) (protocol.FileInfo, bool) {

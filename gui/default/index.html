@@ -497,6 +497,13 @@
                           <span ng-if="folder.type == 'receiveencrypted'" translate>Receive Encrypted</span>
                         </td>
                       </tr>
+                      <tr ng-if="folder.type != 'sendonly'">
+                        <th><span class="fas fa-fw fa-hand-paper"></span>&nbsp;<span>当前设备接收模式</span></th>
+                        <td class="text-right">
+                          <span ng-if="!folder.manualSync">自动接收（当前设备）</span>
+                          <span ng-if="folder.manualSync">手动审核接收（当前设备）</span>
+                        </td>
+                      </tr>
                       <tr ng-if="folder.ignorePerms">
                         <th><span class="far fa-fw fa-minus-square"></span>&nbsp;<span translate>Ignore Permissions</span></th>
                         <td class="text-right">
@@ -630,6 +637,9 @@
                     </button>
                     <button type="button" class="btn btn-default btn-sm" ng-click="restoreVersions.show(folder.id)" ng-if="folder.versioning.type && folder.versioning.type != 'external'" ng-disabled="folder.paused">
                       <span class="fas fa-undo"></span>&nbsp;<span translate>Versions</span>
+                    </button>
+                    <button type="button" class="btn btn-sm btn-default" ng-click="showCompare(folder)" ng-if="compareDevices(folder).length > 0">
+                      <span class="fas fa-exchange-alt"></span>&nbsp;<span>文件对比</span>
                     </button>
                     <button type="button" class="btn btn-sm btn-default" ng-click="rescanFolder(folder.id)" ng-disabled="['idle', 'stopped', 'unshared', 'outofsync', 'faileditems', 'localadditions'].indexOf(folderStatus(folder)) < 0">
                       <span class="fas fa-refresh"></span>&nbsp;<span translate>Rescan</span>
@@ -1023,6 +1033,7 @@
   <ng-include src="'syncthing/transfer/failedFilesModalView.html'"></ng-include>
   <ng-include src="'syncthing/transfer/remoteNeededFilesModalView.html'"></ng-include>
   <ng-include src="'syncthing/transfer/localChangedFilesModalView.html'"></ng-include>
+  <ng-include src="'syncthing/compare/compareFilesModalView.html'"></ng-include>
   <ng-include src="'syncthing/core/upgradeModalView.html'"></ng-include>
   <ng-include src="'syncthing/core/majorUpgradeModalView.html'"></ng-include>
   <ng-include src="'syncthing/core/aboutModalView.html'"></ng-include>

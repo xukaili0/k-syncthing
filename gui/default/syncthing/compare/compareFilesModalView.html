@@ -1,0 +1,220 @@
+<modal id="compare" status="info" icon="fas fa-exchange-alt" heading="文件夹对比" large="yes" closeable="yes">
+  <div class="modal-body">
+    <div class="row">
+      <div class="col-sm-4">
+        <label>目标设备</label>
+        <select class="form-control" ng-model="compare.deviceID" ng-change="refreshCompare(1, compare.perpage)">
+          <option ng-repeat="device in compareDevices(folders[compare.folder])" value="{{device.deviceID}}">
+            {{deviceName(device)}}
+          </option>
+        </select>
+      </div>
+      <div class="col-sm-3">
+        <label>查看范围</label>
+        <select class="form-control" ng-model="compare.view" ng-change="refreshCompare(1, compare.perpage)">
+          <option value="different">仅看差异</option>
+          <option value="all">显示全部文件</option>
+          <option value="same">仅看相同文件</option>
+          <option value="delete">仅看删除项</option>
+          <option value="modified">仅看修改项</option>
+          <option value="conflict">仅看冲突项</option>
+          <option value="only-local">仅本地存在</option>
+          <option value="only-remote">仅远端存在</option>
+          <option value="rename">疑似重命名/移动</option>
+        </select>
+      </div>
+      <div class="col-sm-5">
+        <label>路径前缀</label>
+        <div class="input-group">
+          <input class="form-control" ng-model="compare.prefix" ng-keypress="$event.which === 13 && refreshCompare(1, compare.perpage)" placeholder="目录/子目录">
+          <span class="input-group-btn">
+            <button type="button" class="btn btn-default" ng-click="refreshCompare(1, compare.perpage)">
+              <span class="fas fa-filter"></span>&nbsp;<span>应用筛选</span>
+            </button>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <p class="help-block">
+      <span>当前正在对比文件夹“{{compare.folderLabel}}”与所选设备的文件索引。</span>
+      <span ng-if="compare.manualSync" class="text-info">
+        &nbsp;<span>此文件夹已启用手动审核接收模式。</span>
+        <span>远端变化会进入对比结果，但当前设备不会自动拉取，只有你选中文件后才会同步。</span>
+        <span>这不会阻止当前设备把自己的本地变化发送给其他自动同步的设备。</span>
+      </span>
+      <span ng-if="!compare.remoteConnected" class="text-warning">
+        &nbsp;<span>远端设备当前离线。</span>
+        <span>这里显示的是最近一次已知的远端索引，差异结果可能不是最新状态。</span>
+      </span>
+    </p>
+
+    <div class="alert alert-info" ng-if="compare.entries.length > 0">
+      <div><strong>状态说明：</strong>这里的“本地”指当前正在查看这个 Web GUI 的设备，“远端”指你在上方选中的目标设备。</div>
+      <div><strong>理解方式：</strong>这个列表展示的是“远端状态相对于当前设备会带来什么影响”。所以“仅远端存在”“远端路径已删除”“疑似移动/重命名”等，都是在描述远端变化与当前设备之间的差异。</div>
+      <div><strong>删除说明：</strong>“本地已删除”表示当前设备这个路径已经删除，但远端仍有该路径；“远端已删除”表示目标设备这个路径已经删除，但当前设备仍有该路径。</div>
+      <div><strong>移动/重命名说明：</strong>Syncthing 底层按路径同步，所以一次移动/重命名通常会表现成两条差异：旧路径消失，新路径出现。如果内容哈希能对上，这里会把两条路径排在一起，并标成一组“疑似移动/重命名”。</div>
+      <div><strong>接收模式说明：</strong>手动审核接收只影响当前设备是否自动接收远端变化；是否把本地变化发给别人，仍然由文件夹类型决定。</div>
+      <div><strong>批量选择说明：</strong>“选中当前页可操作条目”会直接勾选当前页中允许同步/置顶的条目，并高亮这些行。</div>
+      <div><strong>批量同步说明：</strong>“同步当前页全部可操作条目”会自动把当前页可操作条目全部加入本次操作并立即开始处理，不需要你再逐个勾选。</div>
+    </div>
+
+    <div class="clearfix">
+      <div class="pull-left">
+        <button type="button" class="btn btn-default btn-sm" ng-click="selectVisibleCompareEntries()" ng-disabled="compareVisibleActionableEntries().length === 0">
+          <span class="fas fa-check-square"></span>&nbsp;<span>选中当前页可操作条目</span>
+        </button>
+      </div>
+      <div class="pull-right">
+        <button type="button" class="btn btn-default btn-sm" ng-click="clearCompareSelection()" ng-disabled="compareSelectionCount() === 0">
+          <span class="fas fa-eraser"></span>&nbsp;<span>清空选择</span>
+        </button>
+        <button type="button" class="btn btn-default btn-sm" ng-click="refreshCompareResults()">
+          <span class="fas fa-refresh"></span>&nbsp;<span>刷新对比</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="clearfix" style="margin-top: 8px;">
+      <div class="pull-left text-muted">
+        共 {{compare.total | localeNumber}} 项
+      </div>
+      <div class="pull-right text-muted">
+        当前页可操作条目 {{compareVisibleActionableEntries().length | localeNumber}} 项，已选中 {{compareSelectionCount() | localeNumber}} 项
+      </div>
+    </div>
+
+    <div class="panel panel-default" ng-if="compare.syncOperation">
+      <div class="panel-heading">
+        <strong>本次{{compareOperationModeLabel()}}</strong>
+      </div>
+      <div class="panel-body">
+        <div class="text-info" ng-if="compare.syncOperation.state === 'submitting' || compare.syncOperation.state === 'refreshing'">{{compare.syncOperation.message}}</div>
+        <div class="text-primary" ng-if="compare.syncOperation.state === 'queued'">{{compare.syncOperation.message}}</div>
+        <div class="text-success" ng-if="compare.syncOperation.state === 'running'">{{compare.syncOperation.message}}</div>
+        <div class="text-success" ng-if="compare.syncOperation.state === 'completed'">{{compare.syncOperation.message}}</div>
+        <div class="text-danger" ng-if="compare.syncOperation.state === 'error'">{{compare.syncOperation.message}}</div>
+        <div class="text-muted small">
+          已提交 {{compare.syncOperation.paths.length}} 个文件，正在传输 {{compareOperationProgress().activeCount}} 个，等待处理 {{compareOperationProgress().queuedCount}} 个
+        </div>
+        <div class="progress" ng-if="compareOperationProgress().bytesTotal > 0" style="margin-top: 8px; margin-bottom: 8px;">
+          <div class="progress-bar progress-bar-success progress-bar-striped active" style="width: {{compareOperationProgress().percent}}%">
+            {{compareOperationProgress().percent}}%
+          </div>
+        </div>
+        <div class="small-data" ng-if="compareOperationProgress().bytesTotal > 0">
+          {{compareOperationProgress().bytesDone | binary}}B / {{compareOperationProgress().bytesTotal | binary}}B
+        </div>
+        <div style="margin-top: 8px;" ng-if="compareOperationTrackedItems().length > 0">
+          <strong>本次处理的文件：</strong>
+          <div class="word-break-all" ng-repeat="item in compareOperationTrackedItems() track by item.path">
+            <span ng-if="compare.syncOperation.state === 'completed'" class="text-success">[已完成]</span>
+            <span ng-if="compare.syncOperation.state === 'error'" class="text-danger">[失败]</span>
+            <span ng-if="compare.syncOperation.state !== 'completed' && compare.syncOperation.state !== 'error' && item.progress" class="text-success">[同步中]</span>
+            <span ng-if="compare.syncOperation.state !== 'completed' && compare.syncOperation.state !== 'error' && !item.progress" class="text-primary">[已提交]</span>
+            {{item.path}}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <table class="table table-striped table-condensed table-auto">
+      <thead>
+        <tr>
+          <th class="col-sm-1"></th>
+          <th class="col-sm-3">路径</th>
+          <th class="col-sm-2">状态</th>
+          <th class="col-sm-2">本地</th>
+          <th class="col-sm-2">远端</th>
+          <th class="col-sm-2">同步状态</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr dir-paginate="entry in compare.entries | itemsPerPage: compare.perpage" current-page="compare.page" total-items="compare.total" pagination-id="compare" ng-class="compareEntryRowClass(entry)">
+          <td>
+            <input type="checkbox" ng-model="compare.selected[entry.path]" ng-disabled="!entry.canPrioritize">
+          </td>
+          <td class="word-break-all">
+            <div ng-if="compareShouldShowRenameGroupSummary($index, entry)" class="small text-primary">
+              <strong>{{compareRenameGroupSummary(entry)}}</strong>
+            </div>
+            <div>{{entry.path}}</div>
+            <div ng-if="entry.renameCandidate" class="small text-info">
+              <span>{{compareRenameHint(entry)}}</span>
+            </div>
+            <div ng-if="entry.renameCandidate" class="small text-muted">
+              <span>底层差异：</span> {{compareRawStatusLabel(entry)}}
+            </div>
+          </td>
+          <td>
+            <span ng-class="compareStatusClass(entry)">{{compareStatusLabel(entry)}}</span>
+          </td>
+          <td class="small-data">
+            <div ng-if="entry.local">
+              <div>
+                <span ng-if="entry.local.type != 'directory'">{{entry.local.size | binary}}B</span>
+                <span ng-if="entry.local.type == 'directory'">目录</span>
+              </div>
+              <div>{{entry.local.modified | date:'yyyy-MM-dd HH:mm:ss'}}</div>
+            </div>
+            <div ng-if="!entry.local" class="text-muted">不存在</div>
+          </td>
+          <td class="small-data">
+            <div ng-if="entry.remote">
+              <div>
+                <span ng-if="entry.remote.type != 'directory'">{{entry.remote.size | binary}}B</span>
+                <span ng-if="entry.remote.type == 'directory'">目录</span>
+              </div>
+              <div>{{entry.remote.modified | date:'yyyy-MM-dd HH:mm:ss'}}</div>
+            </div>
+            <div ng-if="!entry.remote" class="text-muted">不存在</div>
+          </td>
+          <td>
+            <div ng-if="compareProgress(entry)" class="progress">
+              <div class="progress-bar progress-bar-success" style="width: {{compareProgress(entry).reused | percent}}"></div>
+              <div class="progress-bar" style="width: {{compareProgress(entry).copiedFromOrigin | percent}}"></div>
+              <div class="progress-bar progress-bar-info" style="width: {{compareProgress(entry).copiedFromElsewhere | percent}}"></div>
+              <div class="progress-bar progress-bar-warning" style="width: {{compareProgress(entry).pulled | percent}}"></div>
+              <div class="progress-bar progress-bar-danger" style="width: {{compareProgress(entry).pulling | percent}}"></div>
+              <span class="show frontal">
+                {{compareProgress(entry).bytesDone | binary}}B / {{compareProgress(entry).bytesTotal | binary}}B
+              </span>
+            </div>
+            <div ng-if="!compareProgress(entry) && compareEntryInOperation(entry) && compare.syncOperation.state !== 'completed' && compare.syncOperation.state !== 'error'" class="small text-primary">
+              已加入本次{{compareOperationModeLabel()}}队列，等待处理
+            </div>
+            <div ng-if="!compareProgress(entry) && compareEntryInOperation(entry) && compare.syncOperation.state === 'completed'" class="small text-success">
+              本次{{compareOperationModeLabel()}}已完成
+            </div>
+            <div ng-if="!compareProgress(entry) && compareEntryInOperation(entry) && compare.syncOperation.state === 'error'" class="small text-danger">
+              本次{{compareOperationModeLabel()}}提交失败
+            </div>
+            <div ng-if="!compareProgress(entry) && !compareEntryInOperation(entry)" class="text-muted">
+              -
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <dir-pagination-controls on-page-change="refreshCompare(newPageNumber, compare.perpage)" pagination-id="compare"></dir-pagination-controls>
+    <ul class="pagination pull-right">
+      <li ng-repeat="option in [10, 25, 50, 100]" ng-class="{ active: compare.perpage == option }">
+        <a href="" ng-click="refreshCompare(compare.page, option)">{{option}}</a>
+      </li>
+    </ul>
+    <div class="clearfix"></div>
+  </div>
+
+  <div class="modal-footer">
+    <button type="button" class="btn btn-primary btn-sm" ng-click="syncAllVisibleCompare()" ng-disabled="compareVisibleActionableEntries().length === 0 || !compare.folderHasPuller || (compare.syncOperation && (compare.syncOperation.state === 'submitting' || compare.syncOperation.state === 'refreshing'))">
+      <span class="fas fa-layer-group"></span>&nbsp;<span ng-if="!compare.manualSync">置顶当前页全部可操作条目</span><span ng-if="compare.manualSync">同步当前页全部可操作条目</span>
+    </button>
+    <button type="button" class="btn btn-primary btn-sm" ng-click="prioritizeCompareSelected()" ng-disabled="compareSelectionCount() === 0 || !compare.folderHasPuller || (compare.syncOperation && (compare.syncOperation.state === 'submitting' || compare.syncOperation.state === 'refreshing'))">
+      <span class="fas fa-eject"></span>&nbsp;<span ng-if="!compare.manualSync">置顶已选条目</span><span ng-if="compare.manualSync">同步已选条目</span>
+    </button>
+    <button type="button" class="btn btn-default btn-sm" data-dismiss="modal">
+      <span class="fas fa-times"></span>&nbsp;<span>关闭</span>
+    </button>
+  </div>
+</modal>

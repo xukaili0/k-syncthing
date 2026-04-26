@@ -342,6 +342,21 @@ type Model struct {
 		result1 []protocol.FileInfo
 		result2 error
 	}
+	CompareFolderFilesStub        func(string, protocol.DeviceID, model.CompareOptions) (model.CompareResult, error)
+	compareFolderFilesMutex       sync.RWMutex
+	compareFolderFilesArgsForCall []struct {
+		arg1 string
+		arg2 protocol.DeviceID
+		arg3 model.CompareOptions
+	}
+	compareFolderFilesReturns struct {
+		result1 model.CompareResult
+		result2 error
+	}
+	compareFolderFilesReturnsOnCall map[int]struct {
+		result1 model.CompareResult
+		result2 error
+	}
 	LocalFilesStub        func(string, protocol.DeviceID) (iter.Seq[protocol.FileInfo], func() error)
 	localFilesMutex       sync.RWMutex
 	localFilesArgsForCall []struct {
@@ -489,6 +504,29 @@ type Model struct {
 	remoteNeedFolderFilesReturnsOnCall map[int]struct {
 		result1 []protocol.FileInfo
 		result2 error
+	}
+	TriggerFolderPullStub        func(string) error
+	triggerFolderPullMutex       sync.RWMutex
+	triggerFolderPullArgsForCall []struct {
+		arg1 string
+	}
+	triggerFolderPullReturns struct {
+		result1 error
+	}
+	triggerFolderPullReturnsOnCall map[int]struct {
+		result1 error
+	}
+	TriggerFolderPullSelectedStub        func(string, []string) error
+	triggerFolderPullSelectedMutex       sync.RWMutex
+	triggerFolderPullSelectedArgsForCall []struct {
+		arg1 string
+		arg2 []string
+	}
+	triggerFolderPullSelectedReturns struct {
+		result1 error
+	}
+	triggerFolderPullSelectedReturnsOnCall map[int]struct {
+		result1 error
 	}
 	RemoteSequencesStub        func(string) (map[protocol.DeviceID]int64, error)
 	remoteSequencesMutex       sync.RWMutex
@@ -2255,6 +2293,72 @@ func (fake *Model) LocalChangedFolderFilesReturnsOnCall(i int, result1 []protoco
 	}{result1, result2}
 }
 
+func (fake *Model) CompareFolderFiles(arg1 string, arg2 protocol.DeviceID, arg3 model.CompareOptions) (model.CompareResult, error) {
+	fake.compareFolderFilesMutex.Lock()
+	ret, specificReturn := fake.compareFolderFilesReturnsOnCall[len(fake.compareFolderFilesArgsForCall)]
+	fake.compareFolderFilesArgsForCall = append(fake.compareFolderFilesArgsForCall, struct {
+		arg1 string
+		arg2 protocol.DeviceID
+		arg3 model.CompareOptions
+	}{arg1, arg2, arg3})
+	stub := fake.CompareFolderFilesStub
+	fakeReturns := fake.compareFolderFilesReturns
+	fake.recordInvocation("CompareFolderFiles", []interface{}{arg1, arg2, arg3})
+	fake.compareFolderFilesMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *Model) CompareFolderFilesCallCount() int {
+	fake.compareFolderFilesMutex.RLock()
+	defer fake.compareFolderFilesMutex.RUnlock()
+	return len(fake.compareFolderFilesArgsForCall)
+}
+
+func (fake *Model) CompareFolderFilesCalls(stub func(string, protocol.DeviceID, model.CompareOptions) (model.CompareResult, error)) {
+	fake.compareFolderFilesMutex.Lock()
+	defer fake.compareFolderFilesMutex.Unlock()
+	fake.CompareFolderFilesStub = stub
+}
+
+func (fake *Model) CompareFolderFilesArgsForCall(i int) (string, protocol.DeviceID, model.CompareOptions) {
+	fake.compareFolderFilesMutex.RLock()
+	defer fake.compareFolderFilesMutex.RUnlock()
+	argsForCall := fake.compareFolderFilesArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *Model) CompareFolderFilesReturns(result1 model.CompareResult, result2 error) {
+	fake.compareFolderFilesMutex.Lock()
+	defer fake.compareFolderFilesMutex.Unlock()
+	fake.CompareFolderFilesStub = nil
+	fake.compareFolderFilesReturns = struct {
+		result1 model.CompareResult
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *Model) CompareFolderFilesReturnsOnCall(i int, result1 model.CompareResult, result2 error) {
+	fake.compareFolderFilesMutex.Lock()
+	defer fake.compareFolderFilesMutex.Unlock()
+	fake.CompareFolderFilesStub = nil
+	if fake.compareFolderFilesReturnsOnCall == nil {
+		fake.compareFolderFilesReturnsOnCall = make(map[int]struct {
+			result1 model.CompareResult
+			result2 error
+		})
+	}
+	fake.compareFolderFilesReturnsOnCall[i] = struct {
+		result1 model.CompareResult
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *Model) LocalFiles(arg1 string, arg2 protocol.DeviceID) (iter.Seq[protocol.FileInfo], func() error) {
 	fake.localFilesMutex.Lock()
 	ret, specificReturn := fake.localFilesReturnsOnCall[len(fake.localFilesArgsForCall)]
@@ -3264,6 +3368,139 @@ func (fake *Model) RestoreFolderVersionsReturnsOnCall(i int, result1 map[string]
 		result1 map[string]error
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *Model) TriggerFolderPull(arg1 string) error {
+	fake.triggerFolderPullMutex.Lock()
+	ret, specificReturn := fake.triggerFolderPullReturnsOnCall[len(fake.triggerFolderPullArgsForCall)]
+	fake.triggerFolderPullArgsForCall = append(fake.triggerFolderPullArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.TriggerFolderPullStub
+	fakeReturns := fake.triggerFolderPullReturns
+	fake.recordInvocation("TriggerFolderPull", []interface{}{arg1})
+	fake.triggerFolderPullMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *Model) TriggerFolderPullCallCount() int {
+	fake.triggerFolderPullMutex.RLock()
+	defer fake.triggerFolderPullMutex.RUnlock()
+	return len(fake.triggerFolderPullArgsForCall)
+}
+
+func (fake *Model) TriggerFolderPullCalls(stub func(string) error) {
+	fake.triggerFolderPullMutex.Lock()
+	defer fake.triggerFolderPullMutex.Unlock()
+	fake.TriggerFolderPullStub = stub
+}
+
+func (fake *Model) TriggerFolderPullArgsForCall(i int) string {
+	fake.triggerFolderPullMutex.RLock()
+	defer fake.triggerFolderPullMutex.RUnlock()
+	argsForCall := fake.triggerFolderPullArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *Model) TriggerFolderPullReturns(result1 error) {
+	fake.triggerFolderPullMutex.Lock()
+	defer fake.triggerFolderPullMutex.Unlock()
+	fake.TriggerFolderPullStub = nil
+	fake.triggerFolderPullReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *Model) TriggerFolderPullReturnsOnCall(i int, result1 error) {
+	fake.triggerFolderPullMutex.Lock()
+	defer fake.triggerFolderPullMutex.Unlock()
+	fake.TriggerFolderPullStub = nil
+	if fake.triggerFolderPullReturnsOnCall == nil {
+		fake.triggerFolderPullReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.triggerFolderPullReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *Model) TriggerFolderPullSelected(arg1 string, arg2 []string) error {
+	fake.triggerFolderPullSelectedMutex.Lock()
+	ret, specificReturn := fake.triggerFolderPullSelectedReturnsOnCall[len(fake.triggerFolderPullSelectedArgsForCall)]
+	var arg2Copy []string
+	if arg2 != nil {
+		arg2Copy = make([]string, len(arg2))
+		copy(arg2Copy, arg2)
+	}
+	fake.triggerFolderPullSelectedArgsForCall = append(fake.triggerFolderPullSelectedArgsForCall, struct {
+		arg1 string
+		arg2 []string
+	}{arg1, arg2Copy})
+	stub := fake.TriggerFolderPullSelectedStub
+	fakeReturns := fake.triggerFolderPullSelectedReturns
+	fake.recordInvocation("TriggerFolderPullSelected", []interface{}{arg1, arg2Copy})
+	fake.triggerFolderPullSelectedMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *Model) TriggerFolderPullSelectedCallCount() int {
+	fake.triggerFolderPullSelectedMutex.RLock()
+	defer fake.triggerFolderPullSelectedMutex.RUnlock()
+	return len(fake.triggerFolderPullSelectedArgsForCall)
+}
+
+func (fake *Model) TriggerFolderPullSelectedCalls(stub func(string, []string) error) {
+	fake.triggerFolderPullSelectedMutex.Lock()
+	defer fake.triggerFolderPullSelectedMutex.Unlock()
+	fake.TriggerFolderPullSelectedStub = stub
+}
+
+func (fake *Model) TriggerFolderPullSelectedArgsForCall(i int) (string, []string) {
+	fake.triggerFolderPullSelectedMutex.RLock()
+	defer fake.triggerFolderPullSelectedMutex.RUnlock()
+	argsForCall := fake.triggerFolderPullSelectedArgsForCall[i]
+	var arg2Copy []string
+	if argsForCall.arg2 != nil {
+		arg2Copy = make([]string, len(argsForCall.arg2))
+		copy(arg2Copy, argsForCall.arg2)
+	}
+	return argsForCall.arg1, arg2Copy
+}
+
+func (fake *Model) TriggerFolderPullSelectedReturns(result1 error) {
+	fake.triggerFolderPullSelectedMutex.Lock()
+	defer fake.triggerFolderPullSelectedMutex.Unlock()
+	fake.TriggerFolderPullSelectedStub = nil
+	fake.triggerFolderPullSelectedReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *Model) TriggerFolderPullSelectedReturnsOnCall(i int, result1 error) {
+	fake.triggerFolderPullSelectedMutex.Lock()
+	defer fake.triggerFolderPullSelectedMutex.Unlock()
+	fake.TriggerFolderPullSelectedStub = nil
+	if fake.triggerFolderPullSelectedReturnsOnCall == nil {
+		fake.triggerFolderPullSelectedReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.triggerFolderPullSelectedReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
 }
 
 func (fake *Model) Revert(arg1 string) {

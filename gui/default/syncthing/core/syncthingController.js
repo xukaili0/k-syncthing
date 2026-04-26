@@ -485,6 +485,7 @@ angular.module('syncthing.core')
                 }
             }
             $scope.progress = progress;
+            updateCompareSyncOperationStatus(true);
             console.log("DownloadProgress", $scope.progress);
         });
 
@@ -868,6 +869,27 @@ angular.module('syncthing.core')
             $scope.remoteNeedDevice = undefined;
         }
 
+        function resetCompare() {
+            $scope.compare = {
+                folder: '',
+                folderLabel: '',
+                folderHasPuller: true,
+                manualSync: false,
+                device: undefined,
+                deviceID: '',
+                entries: [],
+                page: 1,
+                perpage: 25,
+                total: 0,
+                view: 'different',
+                prefix: '',
+                selected: {},
+                remoteConnected: false,
+                syncOperation: null,
+            };
+        }
+        resetCompare();
+
         function setDefaultTheme() {
             if (!document.getElementById("fallback-theme-css")) {
 
@@ -961,6 +983,33 @@ angular.module('syncthing.core')
             url += "&page=" + page + "&perpage=" + perpage;
             $http.get(url).success(function (data) {
                 $scope.localChanged = data;
+            }).error($scope.emitHTTPError);
+        };
+
+        $scope.refreshCompare = function (page, perpage) {
+            if (!$scope.compare.folder || !$scope.compare.deviceID) {
+                return;
+            }
+
+            var url = urlbase + '/db/compare?folder=' + encodeURIComponent($scope.compare.folder);
+            url += '&device=' + encodeURIComponent($scope.compare.deviceID);
+            url += '&page=' + page;
+            url += '&perpage=' + perpage;
+            url += '&view=' + encodeURIComponent($scope.compare.view);
+            if ($scope.compare.prefix) {
+                url += '&prefix=' + encodeURIComponent($scope.compare.prefix);
+            }
+
+            $http.get(url).success(function (data) {
+                $scope.compare.entries = data.entries;
+                $scope.compare.page = data.page;
+                $scope.compare.perpage = data.perpage;
+                $scope.compare.total = data.total;
+                $scope.compare.remoteConnected = data.remoteConnected;
+                $scope.compare.folderHasPuller = data.folderHasPuller;
+                $scope.compare.manualSync = !!data.manualSync;
+                $scope.compare.selected = {};
+                updateCompareSyncOperationStatus(false);
             }).error($scope.emitHTTPError);
         };
 
@@ -2279,6 +2328,9 @@ angular.module('syncthing.core')
             } else {
                 $scope.currentFolder.fsWatcherEnabled = true;
             }
+            if ($scope.currentFolder.type === 'sendonly') {
+                $scope.currentFolder.manualSync = false;
+            }
             $scope.setFSWatcherIntervalDefault();
         };
 
@@ -3081,6 +3133,26 @@ angular.module('syncthing.core')
             });
         };
 
+        $scope.showCompare = function (folder) {
+            resetCompare();
+            $scope.compare.folder = folder.id;
+            $scope.compare.folderLabel = $scope.folderLabel(folder.id);
+
+            var devices = $scope.compareDevices(folder);
+            if (devices.length === 0) {
+                return;
+            }
+
+            $scope.compare.device = devices[0];
+            $scope.compare.deviceID = devices[0].deviceID;
+            $scope.refreshCompare(1, $scope.compare.perpage);
+
+            $('#compare').one('hidden.bs.modal', function () {
+                resetCompare();
+            });
+            showModal('#compare');
+        };
+
         $scope.showNeed = function (folder) {
             $scope.neededFolder = folder;
             $scope.refreshNeed(1, 10);
@@ -3149,6 +3221,395 @@ angular.module('syncthing.core')
             }
             var counts = $scope.model[folderCfg.id];
             return counts && counts.receiveOnlyTotalItems > 0;
+        };
+
+        $scope.compareDevices = function (folderCfg) {
+            if (!folderCfg || !folderCfg.devices) {
+                return [];
+            }
+            return $scope.otherDevices(folderCfg.devices).map(function (sharedDevice) {
+                return $scope.devices[sharedDevice.deviceID];
+            }).filter(function (deviceCfg) {
+                return !!deviceCfg;
+            }).sort(deviceCompare);
+        };
+
+        $scope.compareStatusLabel = function (entry) {
+            if (entry.renameCandidate) {
+                switch ($scope.compareRenameRole(entry)) {
+                    case 'old':
+                        return '疑似移动/重命名（旧路径）';
+                    case 'new':
+                        return '疑似移动/重命名（新路径）';
+                    default:
+                        return '疑似移动/重命名';
+                }
+            }
+
+            return $scope.compareRawStatusLabel(entry);
+        };
+
+        $scope.compareRawStatusLabel = function (entry) {
+            switch (entry.status) {
+                case 'same':
+                    return '相同';
+                case 'only-local':
+                    return '仅本地存在';
+                case 'only-remote':
+                    return '仅远端存在';
+                case 'deleted-local':
+                    return '本地路径已删除';
+                case 'deleted-remote':
+                    return '远端路径已删除';
+                case 'modified':
+                    return '已修改';
+                case 'conflict':
+                    return '冲突';
+                case 'type-changed':
+                    return '类型变化';
+                default:
+                    return entry.status;
+            }
+        };
+
+        $scope.compareStatusClass = function (entry) {
+            if (entry.renameCandidate) {
+                return 'text-primary';
+            }
+
+            switch (entry.status) {
+                case 'same':
+                    return 'text-success';
+                case 'modified':
+                case 'type-changed':
+                    return 'text-warning';
+                case 'conflict':
+                    return 'text-danger';
+                case 'deleted-local':
+                case 'deleted-remote':
+                    return 'text-muted';
+                default:
+                    return 'text-info';
+            }
+        };
+
+        $scope.compareRenameGroupKey = function (entry) {
+            if (!entry.renameCandidate) {
+                return '';
+            }
+            return entry.path < entry.renameCandidate
+                ? entry.path + '\u0000' + entry.renameCandidate
+                : entry.renameCandidate + '\u0000' + entry.path;
+        };
+
+        $scope.compareShouldShowRenameGroupSummary = function (index, entry) {
+            if (!entry.renameCandidate) {
+                return false;
+            }
+            if (index === 0) {
+                return true;
+            }
+            return $scope.compareRenameGroupKey(entry) !== $scope.compareRenameGroupKey($scope.compare.entries[index - 1]);
+        };
+
+        $scope.compareRenameGroupSummary = function (entry) {
+            switch ($scope.compareRenameRole(entry)) {
+                case 'old':
+                    return '疑似移动/重命名组：' + entry.path + ' -> ' + entry.renameCandidate;
+                case 'new':
+                    return '疑似移动/重命名组：' + entry.renameCandidate + ' -> ' + entry.path;
+                default:
+                    return '疑似移动/重命名组：' + entry.path + ' <-> ' + entry.renameCandidate;
+            }
+        };
+
+        $scope.compareRenameHint = function (entry) {
+            switch ($scope.compareRenameRole(entry)) {
+                case 'old':
+                    return '这是旧路径；移动/重命名后的新路径是：' + entry.renameCandidate;
+                case 'new':
+                    return '这是新路径；移动/重命名之前的旧路径是：' + entry.renameCandidate;
+                default:
+                    return '检测到同内容的配对路径：' + entry.renameCandidate;
+            }
+        };
+
+        $scope.compareRenameRole = function (entry) {
+            if (!entry.renameCandidate) {
+                return '';
+            }
+
+            switch (entry.status) {
+                case 'deleted-remote':
+                case 'only-local':
+                    return 'old';
+                case 'deleted-local':
+                case 'only-remote':
+                    return 'new';
+                default:
+                    return '';
+            }
+        };
+
+        $scope.compareFileSize = function (file) {
+            if (!file || file.type === 'DIRECTORY') {
+                return 0;
+            }
+            return file.size;
+        };
+
+        $scope.compareProgress = function (entry) {
+            if (!$scope.progress || !$scope.progress[$scope.compare.folder]) {
+                return null;
+            }
+            return $scope.progress[$scope.compare.folder][entry.path] || null;
+        };
+
+        $scope.compareSelectionCount = function () {
+            return Object.keys($scope.compare.selected).filter(function (path) {
+                return !!$scope.compare.selected[path];
+            }).length;
+        };
+
+        $scope.clearCompareSelection = function () {
+            $scope.compare.selected = {};
+        };
+
+        $scope.refreshCompareResults = function () {
+            $scope.clearCompareSelection();
+            $scope.refreshCompare($scope.compare.page, $scope.compare.perpage);
+        };
+
+        $scope.compareVisibleActionableEntries = function () {
+            return $scope.compare.entries.filter(function (entry) {
+                return entry.canPrioritize;
+            });
+        };
+
+        $scope.selectVisibleCompareEntries = function () {
+            $scope.toggleCompareSelection(true);
+        };
+
+        $scope.toggleCompareSelection = function (state) {
+            $scope.compare.entries.forEach(function (entry) {
+                if (entry.canPrioritize) {
+                    $scope.compare.selected[entry.path] = state;
+                }
+            });
+        };
+
+        $scope.compareOperationModeLabel = function () {
+            return $scope.compare.manualSync ? '同步' : '置顶';
+        };
+
+        $scope.compareEntryInOperation = function (entry) {
+            if (!$scope.compare.syncOperation || !$scope.compare.syncOperation.pathSet) {
+                return false;
+            }
+            return !!$scope.compare.syncOperation.pathSet[entry.path];
+        };
+
+        $scope.compareEntryRowClass = function (entry) {
+            if ($scope.compare.selected[entry.path]) {
+                return 'info';
+            }
+            if ($scope.compareEntryInOperation(entry) && (!$scope.compare.syncOperation || ($scope.compare.syncOperation.state !== 'completed' && $scope.compare.syncOperation.state !== 'error'))) {
+                return 'warning';
+            }
+            return '';
+        };
+
+        $scope.compareOperationTrackedItems = function () {
+            if (!$scope.compare.syncOperation || !$scope.compare.syncOperation.paths) {
+                return [];
+            }
+
+            var folderProgress = compareFolderProgress();
+            return $scope.compare.syncOperation.paths.map(function (path) {
+                return {
+                    path: path,
+                    progress: folderProgress[path] || null,
+                };
+            });
+        };
+
+        $scope.compareOperationProgress = function () {
+            var tracked = $scope.compareOperationTrackedItems();
+            var operation = $scope.compare.syncOperation;
+            var summary = {
+                activeCount: 0,
+                queuedCount: 0,
+                bytesDone: 0,
+                bytesTotal: 0,
+                percent: 0,
+            };
+
+            tracked.forEach(function (item) {
+                if (!item.progress) {
+                    summary.queuedCount += 1;
+                    return;
+                }
+
+                summary.activeCount += 1;
+                summary.bytesDone += item.progress.bytesDone;
+                summary.bytesTotal += item.progress.bytesTotal;
+            });
+
+            if (summary.bytesTotal > 0) {
+                summary.percent = Math.floor(100 * summary.bytesDone / summary.bytesTotal);
+            }
+
+            if (operation && (operation.state === 'completed' || operation.state === 'error')) {
+                summary.queuedCount = 0;
+            }
+
+            return summary;
+        };
+
+        function compareFolderProgress() {
+            if (!$scope.progress || !$scope.compare.folder || !$scope.progress[$scope.compare.folder]) {
+                return {};
+            }
+            return $scope.progress[$scope.compare.folder];
+        }
+
+        function setCompareSyncOperation(entries, mode, state, message) {
+            var paths = entries.map(function (entry) {
+                return entry.path;
+            });
+            var pathSet = {};
+            paths.forEach(function (path) {
+                pathSet[path] = true;
+            });
+
+            $scope.compare.syncOperation = {
+                mode: mode,
+                state: state,
+                message: message,
+                paths: paths,
+                pathSet: pathSet,
+                startedAt: new Date(),
+            };
+        }
+
+        function compareOperationHasVisibleDifference() {
+            if (!$scope.compare.syncOperation || !$scope.compare.syncOperation.paths) {
+                return false;
+            }
+
+            return $scope.compare.entries.some(function (entry) {
+                return $scope.compare.syncOperation.pathSet[entry.path];
+            });
+        }
+
+        function updateCompareSyncOperationStatus(triggerRefreshWhenIdle) {
+            if (!$scope.compare || !$scope.compare.syncOperation) {
+                return;
+            }
+
+            var operation = $scope.compare.syncOperation;
+            var progressSummary = $scope.compareOperationProgress();
+
+            if (progressSummary.activeCount > 0) {
+                operation.state = 'running';
+                operation.message = operation.mode === 'sync'
+                    ? '已开始同步，下面会显示正在同步的文件和进度。'
+                    : '已开始处理优先队列，下面会显示正在同步的文件和进度。';
+                return;
+            }
+
+            if (operation.state === 'submitting') {
+                return;
+            }
+
+            if (compareOperationHasVisibleDifference()) {
+                operation.state = 'queued';
+                operation.message = operation.mode === 'sync'
+                    ? '文件已加入同步队列，正在等待开始。'
+                    : '文件已加入优先队列，等待同步器处理。';
+                return;
+            }
+
+            if (triggerRefreshWhenIdle && (operation.state === 'queued' || operation.state === 'running')) {
+                operation.state = 'refreshing';
+                operation.message = '传输状态已变化，正在刷新差异列表...';
+                $scope.refreshCompare($scope.compare.page, $scope.compare.perpage);
+                return;
+            }
+
+            operation.state = 'completed';
+            operation.message = operation.mode === 'sync'
+                ? '本次选中文件的同步已完成，差异列表已刷新。'
+                : '本次选中文件已完成置顶，差异列表已刷新。';
+        }
+
+        function syncCompareEntries(entries) {
+            if (!entries || entries.length === 0) {
+                return $q.when();
+            }
+
+            var mode = $scope.compare.manualSync ? 'sync' : 'prioritize';
+            setCompareSyncOperation(
+                entries,
+                mode,
+                'submitting',
+                mode === 'sync'
+                    ? '正在提交同步请求，请稍候...'
+                    : '正在提交优先队列请求，请稍候...'
+            );
+
+            var requests = entries.map(function (entry) {
+                return $http.post(urlbase + '/db/prio?folder='
+                    + encodeURIComponent($scope.compare.folder)
+                    + '&file=' + encodeURIComponent(entry.path));
+            });
+
+            return $q.all(requests).then(function () {
+                if ($scope.compare.manualSync) {
+                    return $http.post(
+                        urlbase + '/db/pullselected?folder=' + encodeURIComponent($scope.compare.folder),
+                        { files: entries.map(function (entry) { return entry.path; }) }
+                    );
+                }
+                return null;
+            }).then(function () {
+                if ($scope.compare.syncOperation) {
+                    $scope.compare.syncOperation.state = 'queued';
+                    $scope.compare.syncOperation.message = mode === 'sync'
+                        ? '文件已加入同步队列，正在等待开始。'
+                        : '文件已加入优先队列，等待同步器处理。';
+                }
+                $scope.refreshCompareResults();
+            }).catch(function (err) {
+                if ($scope.compare.syncOperation) {
+                    $scope.compare.syncOperation.state = 'error';
+                    $scope.compare.syncOperation.message = '提交本次操作失败，请稍后重试。';
+                }
+                return $q.reject(err);
+            });
+        }
+
+        $scope.prioritizeCompareSelected = function () {
+            var selectedEntries = $scope.compare.entries.filter(function (entry) {
+                return $scope.compare.selected[entry.path] && entry.canPrioritize;
+            });
+            if (selectedEntries.length === 0) {
+                return;
+            }
+
+            syncCompareEntries(selectedEntries).catch($scope.emitHTTPError);
+        };
+
+        $scope.syncAllVisibleCompare = function () {
+            var visibleEntries = $scope.compareVisibleActionableEntries();
+            if (visibleEntries.length === 0) {
+                return;
+            }
+
+            visibleEntries.forEach(function (entry) {
+                $scope.compare.selected[entry.path] = true;
+            });
+            syncCompareEntries(visibleEntries).catch($scope.emitHTTPError);
         };
 
         $scope.revertOverride = function () {

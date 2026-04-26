@@ -60,6 +60,8 @@ var (
 	numVersions   = 5
 )
 
+const customVersionFile = "CUSTOM_VERSION"
+
 type target struct {
 	name              string
 	debname           string
@@ -341,7 +343,7 @@ func runCommand(cmd string, target target) {
 		metalint()
 
 	case "version":
-		fmt.Println(getVersion())
+		fmt.Println(displayVersion())
 
 	case "changelog":
 		vers, err := currentAndLatestVersions(numVersions)
@@ -898,6 +900,7 @@ func weblate() {
 }
 
 func ldflags(tags []string) string {
+	tags = appendCustomVersionTag(tags)
 	b := new(strings.Builder)
 	b.WriteString("-w")
 	b.WriteString(" -buildid=")
@@ -910,6 +913,49 @@ func ldflags(tags []string) string {
 		fmt.Fprintf(b, " %s", v)
 	}
 	return b.String()
+}
+
+func displayVersion() string {
+	if tag := readCustomVersionTag(); tag != "" {
+		return fmt.Sprintf("%s [%s]", getVersion(), tag)
+	}
+	return getVersion()
+}
+
+func appendCustomVersionTag(tags []string) []string {
+	if tag := readCustomVersionTag(); tag != "" {
+		return append(tags, tag)
+	}
+	return tags
+}
+
+func readCustomVersionTag() string {
+	bs, err := os.ReadFile(customVersionFile)
+	if err != nil {
+		return ""
+	}
+
+	tag := strings.TrimSpace(string(bs))
+	if tag == "" {
+		return ""
+	}
+
+	filtered := filterCustomVersionTag(tag)
+	if filtered != tag {
+		log.Fatalf("Invalid custom version tag %q in %s", tag, customVersionFile)
+	}
+
+	return tag
+}
+
+func filterCustomVersionTag(tag string) string {
+	var res strings.Builder
+	for _, c := range tag {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' {
+			res.WriteRune(c)
+		}
+	}
+	return res.String()
 }
 
 func rmr(paths ...string) {

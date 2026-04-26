@@ -212,7 +212,9 @@ func (f *folder) Serve(ctx context.Context) error {
 		case <-initialCompleted:
 			// Initial scan has completed, we should do a pull
 			initialCompleted = nil // never hit this case again
-			_, err = f.pull(ctx)
+			if !f.ManualSync {
+				_, err = f.pull(ctx)
+			}
 
 		case <-f.forcedRescanRequested:
 			err = f.handleForcedRescans(ctx)
@@ -284,6 +286,13 @@ func (f *folder) ignoresUpdated() {
 }
 
 func (f *folder) SchedulePull() {
+	if f.ManualSync {
+		return
+	}
+	f.TriggerPull()
+}
+
+func (f *folder) TriggerPull() {
 	select {
 	case f.pullScheduled <- struct{}{}:
 	default:
@@ -292,6 +301,10 @@ func (f *folder) SchedulePull() {
 		// queued to ensure we recheck after the pull, but beyond that we must
 		// make sure to not block index receiving.
 	}
+}
+
+func (f *folder) TriggerPullSelected(_ []string) {
+	f.TriggerPull()
 }
 
 func (*folder) Jobs(_, _ int) ([]string, []string, int) {

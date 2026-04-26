@@ -258,6 +258,26 @@
           </div>
 
           <div class="row">
+            <div class="col-md-6 form-group">
+              <label>
+                <input type="checkbox" ng-disabled="currentFolder.type == 'sendonly'" ng-model="currentFolder.manualSync" /> <span>手动审核接收（以当前设备为基准）</span>
+              </label>
+              <p class="help-block">
+                继续接收其他设备的索引更新用于文件对比，但当前设备不会自动拉取这些变化。你需要在 compare 视图中先查看差异，再手动选择同步。
+              </p>
+              <p class="help-block">
+                这个开关只控制“当前设备接收其他设备的变化”。它不阻止当前设备把自己的本地新增、修改、删除通告给其他设备。
+              </p>
+              <p class="help-block">
+                如果希望所有设备都先审核差异、再决定是否接收，就需要在每一个作为接收端的设备上都开启这个选项。
+              </p>
+              <p class="help-block" ng-if="currentFolder.type === 'sendonly'" translate translate-value-foldertype="{{'Send Only' | translate}}">
+                Cannot be enabled when the folder type is "{%foldertype%}".
+              </p>
+            </div>
+          </div>
+
+          <div class="row">
             <div class="col-md-6 form-group" ng-class="{'has-error': folderEditor.minDiskFree.$invalid && folderEditor.minDiskFree.$dirty}">
               <label for="minDiskFree" translate>Minimum Free Disk Space</label><br />
               <div class="row">

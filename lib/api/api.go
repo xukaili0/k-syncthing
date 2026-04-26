@@ -256,6 +256,7 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/file", s.getDBFile)                         // folder file
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/ignores", s.getDBIgnores)                   // folder
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/need", s.getDBNeed)                         // folder [perpage] [page]
+	restMux.HandlerFunc(http.MethodGet, "/rest/db/compare", s.getDBCompare)                   // device folder [perpage] [page] [prefix] [view]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/remoteneed", s.getDBRemoteNeed)             // device folder [perpage] [page]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/localchanged", s.getDBLocalChanged)         // folder [perpage] [page]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/status", s.getDBStatus)                     // folder
@@ -287,6 +288,8 @@ func (s *service) Serve(ctx context.Context) error {
 
 	// The POST handlers
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/prio", s.postDBPrio)                          // folder file
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/pull", s.postDBPull)                          // folder
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/pullselected", s.postDBPullSelected)          // folder <body>
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/ignores", s.postDBIgnores)                    // folder
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/override", s.postDBOverride)                  // folder
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/revert", s.postDBRevert)                      // folder
@@ -890,6 +893,43 @@ func (s *service) getDBLocalChanged(w http.ResponseWriter, r *http.Request) {
 		"files":   toJsonFileInfoSlice(files),
 		"page":    page,
 		"perpage": perpage,
+	})
+}
+
+func (s *service) getDBCompare(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+
+	folder := qs.Get("folder")
+	device := qs.Get("device")
+	deviceID, err := protocol.DeviceIDFromString(device)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	page, perpage := getPagingParams(qs)
+	result, err := s.model.CompareFolderFiles(folder, deviceID, model.CompareOptions{
+		Page:    page,
+		PerPage: perpage,
+		Prefix:  qs.Get("prefix"),
+		View:    qs.Get("view"),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	sendJSON(w, map[string]interface{}{
+		"entries":         toJSONCompareEntrySlice(result.Entries),
+		"page":            result.Page,
+		"perpage":         result.PerPage,
+		"total":           result.Total,
+		"remoteConnected": result.RemoteConnected,
+		"folderHasPuller": result.FolderHasPuller,
+		"manualSync":      result.ManualSync,
+		"device":          result.RemoteDeviceID.String(),
+		"view":            result.RequestedView,
+		"prefix":          result.RequestedPrefix,
 	})
 }
 
@@ -1565,6 +1605,41 @@ func (s *service) postDBPrio(w http.ResponseWriter, r *http.Request) {
 	s.getDBNeed(w, r)
 }
 
+func (s *service) postDBPull(w http.ResponseWriter, r *http.Request) {
+	folder := r.URL.Query().Get("folder")
+	if err := s.model.TriggerFolderPull(folder); err != nil {
+		status := http.StatusInternalServerError
+		if isFolderNotFound(err) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	sendJSON(w, map[string]any{"ok": true})
+}
+
+func (s *service) postDBPullSelected(w http.ResponseWriter, r *http.Request) {
+	folder := r.URL.Query().Get("folder")
+
+	var body struct {
+		Files []string `json:"files"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := s.model.TriggerFolderPullSelected(folder, body.Files); err != nil {
+		status := http.StatusInternalServerError
+		if isFolderNotFound(err) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	sendJSON(w, map[string]any{"ok": true})
+}
+
 func (*service) getHealth(w http.ResponseWriter, _ *http.Request) {
 	sendJSON(w, map[string]string{"status": "OK"})
 }
@@ -1760,14 +1835,40 @@ func toJsonFileInfoSlice(fs []protocol.FileInfo) []jsonFileInfo {
 	return res
 }
 
+func toJSONCompareEntrySlice(entries []model.CompareEntry) []jsonCompareEntry {
+	res := make([]jsonCompareEntry, len(entries))
+	for i, entry := range entries {
+		res[i] = jsonCompareEntry(entry)
+	}
+	return res
+}
+
 // Type wrappers for nice JSON serialization
 
 type jsonFileInfo protocol.FileInfo
+type jsonCompareEntry model.CompareEntry
 
 func (f jsonFileInfo) MarshalJSON() ([]byte, error) {
 	m := fileIntfJSONMap(protocol.FileInfo(f))
 	m["numBlocks"] = len(f.Blocks)
 	return json.Marshal(m)
+}
+
+func (e jsonCompareEntry) MarshalJSON() ([]byte, error) {
+	entry := model.CompareEntry(e)
+	out := map[string]interface{}{
+		"path":            entry.Path,
+		"status":          entry.Status,
+		"renameCandidate": entry.RenameCandidate,
+		"canPrioritize":   entry.CanPrioritize,
+	}
+	if entry.Local != nil {
+		out["local"] = jsonFileInfo(*entry.Local)
+	}
+	if entry.Remote != nil {
+		out["remote"] = jsonFileInfo(*entry.Remote)
+	}
+	return json.Marshal(out)
 }
 
 func fileIntfJSONMap(f protocol.FileInfo) map[string]interface{} {
