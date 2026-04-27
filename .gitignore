@@ -18,3 +18,10 @@ deb
 /repos
 /proto/scripts/protoc-gen-gosyncthing
 /compat.json
+
+
+gui/react-app/node_modules
+
+/home/lxk11/syncthing_dev/syncthing/gui/react-app/node_modules/
+
+/home/lxk11/syncthing_dev/syncthing-android/syncthing/src/github.com/syncthing/syncthing/gui/react-app/node_modules
