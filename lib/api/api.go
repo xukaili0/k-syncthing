@@ -1947,9 +1947,10 @@ func (e jsonCompareEntry) MarshalJSON() ([]byte, error) {
 func (e jsonPendingPublishEntry) MarshalJSON() ([]byte, error) {
 	entry := model.PendingPublishEntry(e)
 	out := map[string]interface{}{
-		"path":       entry.Path,
-		"action":     entry.Action,
-		"canPublish": entry.CanPublish,
+		"path":            entry.Path,
+		"action":          entry.Action,
+		"renameCandidate": entry.RenameCandidate,
+		"canPublish":      entry.CanPublish,
 	}
 	if entry.Local != nil {
 		out["local"] = jsonFileInfo(*entry.Local)

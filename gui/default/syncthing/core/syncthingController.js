@@ -16,9 +16,43 @@ angular.module('syncthing.core')
         var uiRefreshIntervalMs = 5000;
         var compareAutoRefreshMs = 3000;
         var publishReviewAutoRefreshMs = 3000;
+        var uiRefreshTimer = null;
         var compareAutoRefreshPromise = null;
         var publishReviewAutoRefreshPromise = null;
         var modalRefreshPromise = null;
+
+        function readRefreshIntervalMs(storageKey, fallbackMs) {
+            try {
+                var rawValue = window.localStorage[storageKey];
+                if (!rawValue) {
+                    return fallbackMs;
+                }
+                var seconds = parseInt(rawValue, 10);
+                if (isNaN(seconds) || seconds < 2) {
+                    return fallbackMs;
+                }
+                return seconds * 1000;
+            } catch (exception) {
+                return fallbackMs;
+            }
+        }
+
+        function persistRefreshIntervalSeconds(storageKey, seconds) {
+            try {
+                window.localStorage[storageKey] = String(seconds);
+            } catch (exception) { }
+        }
+
+        function restartUIRefreshTimer() {
+            if (uiRefreshTimer) {
+                clearInterval(uiRefreshTimer);
+                uiRefreshTimer = null;
+            }
+            if (!$scope.authenticated) {
+                return;
+            }
+            uiRefreshTimer = setInterval($scope.refresh, uiRefreshIntervalMs);
+        }
 
         function initController() {
             LocaleService.autoConfigLocale();
@@ -37,7 +71,7 @@ angular.module('syncthing.core')
                 return;
             }
 
-            setInterval($scope.refresh, uiRefreshIntervalMs);
+            restartUIRefreshTimer();
             Events.start();
         }
 
@@ -134,6 +168,11 @@ angular.module('syncthing.core')
             password: '',
             errors: {},
         };
+        $scope.uiRefreshChoices = [2, 3, 5, 10, 15, 30];
+        $scope.uiRefreshSettings = {
+            mainSeconds: uiRefreshIntervalMs / 1000,
+            modalSeconds: compareAutoRefreshMs / 1000,
+        };
         $scope.completion = {};
         $scope.config = {};
         $scope.configInSync = true;
@@ -178,6 +217,12 @@ angular.module('syncthing.core')
             saved: false,
         };
         resetRemoteNeed();
+
+        uiRefreshIntervalMs = readRefreshIntervalMs('uiRefreshIntervalSeconds', uiRefreshIntervalMs);
+        compareAutoRefreshMs = readRefreshIntervalMs('modalRefreshIntervalSeconds', compareAutoRefreshMs);
+        publishReviewAutoRefreshMs = compareAutoRefreshMs;
+        $scope.uiRefreshSettings.mainSeconds = uiRefreshIntervalMs / 1000;
+        $scope.uiRefreshSettings.modalSeconds = compareAutoRefreshMs / 1000;
 
         try {
             $scope.metricRates = (window.localStorage["metricRates"] == "true");
@@ -966,6 +1011,7 @@ angular.module('syncthing.core')
                 selected: {},
                 remoteConnected: false,
                 syncOperation: null,
+                showHelp: false,
             };
         }
         resetCompare();
@@ -984,6 +1030,7 @@ angular.module('syncthing.core')
                 manualPublish: false,
                 folderCanPublish: false,
                 publishOperation: null,
+                showHelp: false,
             };
         }
         resetPublishReview();
@@ -1203,6 +1250,36 @@ angular.module('syncthing.core')
             refreshDiscoveryCache();
             refreshConnectionStats();
             refreshErrors();
+        };
+
+        $scope.applyUIRefreshSettings = function () {
+            var mainSeconds = parseInt($scope.uiRefreshSettings.mainSeconds, 10);
+            var modalSeconds = parseInt($scope.uiRefreshSettings.modalSeconds, 10);
+
+            if (isNaN(mainSeconds) || mainSeconds < 2) {
+                mainSeconds = 5;
+            }
+            if (isNaN(modalSeconds) || modalSeconds < 2) {
+                modalSeconds = 3;
+            }
+
+            uiRefreshIntervalMs = mainSeconds * 1000;
+            compareAutoRefreshMs = modalSeconds * 1000;
+            publishReviewAutoRefreshMs = modalSeconds * 1000;
+
+            $scope.uiRefreshSettings.mainSeconds = mainSeconds;
+            $scope.uiRefreshSettings.modalSeconds = modalSeconds;
+
+            persistRefreshIntervalSeconds('uiRefreshIntervalSeconds', mainSeconds);
+            persistRefreshIntervalSeconds('modalRefreshIntervalSeconds', modalSeconds);
+
+            restartUIRefreshTimer();
+            if ($scope.compare.folder) {
+                scheduleCompareAutoRefresh();
+            }
+            if ($scope.publishReview.folder) {
+                schedulePublishReviewAutoRefresh();
+            }
         };
 
         $scope.folderStatus = function (folderCfg) {
@@ -3423,21 +3500,21 @@ angular.module('syncthing.core')
         $scope.publishReviewRemoteStateLabel = function (deviceID) {
             var comp = $scope.completion[deviceID] && $scope.completion[deviceID][$scope.publishReview.folder];
             if (!comp || !comp.remoteState) {
-                return '状态未知';
+                return '未知';
             }
             switch (comp.remoteState) {
                 case 'idle':
-                    return '远端空闲';
+                    return '空闲';
                 case 'syncing':
-                    return '远端同步中';
+                    return '同步中';
                 case 'scanning':
-                    return '远端扫描中';
+                    return '扫描中';
                 case 'paused':
-                    return '远端文件夹已暂停';
+                    return '已暂停';
                 case 'notSharing':
-                    return '远端尚未接受共享';
+                    return '未共享';
                 case 'cleaning':
-                    return '远端清理中';
+                    return '清理中';
                 default:
                     return comp.remoteState;
             }
@@ -3452,6 +3529,16 @@ angular.module('syncthing.core')
         };
 
         $scope.pendingPublishActionLabel = function (entry) {
+            if (entry.renameCandidate) {
+                switch ($scope.pendingPublishRenameRole(entry)) {
+                    case 'old':
+                        return '疑似移动/重命名（旧路径）';
+                    case 'new':
+                        return '疑似移动/重命名（新路径）';
+                    default:
+                        return '疑似移动/重命名';
+                }
+            }
             switch (entry.action) {
                 case 'added':
                     return '待发布新增';
@@ -3464,6 +3551,9 @@ angular.module('syncthing.core')
         };
 
         $scope.pendingPublishActionClass = function (entry) {
+            if (entry.renameCandidate) {
+                return 'text-primary';
+            }
             switch (entry.action) {
                 case 'added':
                     return 'text-success';
@@ -3519,6 +3609,61 @@ angular.module('syncthing.core')
                 return 'warning';
             }
             return '';
+        };
+
+        $scope.pendingPublishRenameGroupKey = function (entry) {
+            if (!entry.renameCandidate) {
+                return '';
+            }
+            return entry.path < entry.renameCandidate
+                ? entry.path + '\u0000' + entry.renameCandidate
+                : entry.renameCandidate + '\u0000' + entry.path;
+        };
+
+        $scope.pendingPublishShouldShowRenameGroupSummary = function (index, entry) {
+            if (!entry.renameCandidate) {
+                return false;
+            }
+            if (index === 0) {
+                return true;
+            }
+            return $scope.pendingPublishRenameGroupKey(entry) !== $scope.pendingPublishRenameGroupKey($scope.publishReview.entries[index - 1]);
+        };
+
+        $scope.pendingPublishRenameRole = function (entry) {
+            if (!entry.renameCandidate) {
+                return '';
+            }
+            switch (entry.action) {
+                case 'delete':
+                    return 'old';
+                case 'added':
+                    return 'new';
+                default:
+                    return '';
+            }
+        };
+
+        $scope.pendingPublishRenameGroupSummary = function (entry) {
+            switch ($scope.pendingPublishRenameRole(entry)) {
+                case 'old':
+                    return '疑似移动/重命名组：' + entry.path + ' -> ' + entry.renameCandidate;
+                case 'new':
+                    return '疑似移动/重命名组：' + entry.renameCandidate + ' -> ' + entry.path;
+                default:
+                    return '疑似移动/重命名组：' + entry.path + ' <-> ' + entry.renameCandidate;
+            }
+        };
+
+        $scope.pendingPublishRenameHint = function (entry) {
+            switch ($scope.pendingPublishRenameRole(entry)) {
+                case 'old':
+                    return '这是旧路径；发布后的新路径是：' + entry.renameCandidate;
+                case 'new':
+                    return '这是新路径；发布前的旧路径是：' + entry.renameCandidate;
+                default:
+                    return '检测到同内容的配对路径：' + entry.renameCandidate;
+            }
         };
 
         $scope.compareStatusLabel = function (entry) {
@@ -3636,6 +3781,41 @@ angular.module('syncthing.core')
                 default:
                     return '';
             }
+        };
+
+        $scope.compareRemoteConnectionLabel = function () {
+            return $scope.compare.remoteConnected ? '已连接' : '离线';
+        };
+
+        $scope.compareRemoteConnectionClass = function () {
+            return $scope.compare.remoteConnected ? 'label-success' : 'label-warning';
+        };
+
+        $scope.compareRemoteFolderStateLabel = function () {
+            var comp = $scope.completion[$scope.compare.deviceID] && $scope.completion[$scope.compare.deviceID][$scope.compare.folder];
+            if (!comp || !comp.remoteState) {
+                return '未知';
+            }
+            switch (comp.remoteState) {
+                case 'idle':
+                    return '空闲';
+                case 'syncing':
+                    return '同步中';
+                case 'scanning':
+                    return '扫描中';
+                case 'paused':
+                    return '已暂停';
+                case 'notSharing':
+                    return '未共享';
+                case 'cleaning':
+                    return '清理中';
+                default:
+                    return comp.remoteState;
+            }
+        };
+
+        $scope.compareRemoteIndexLabel = function () {
+            return $scope.compare.remoteConnected ? '实时索引' : '最近已知索引';
         };
 
         $scope.compareFileSize = function (file) {

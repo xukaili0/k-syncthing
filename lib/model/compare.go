@@ -210,14 +210,14 @@ func compareEntryStatus(localOK, remoteOK bool, local, remote protocol.FileInfo,
 			return "deleted-local"
 		}
 		return "only-local"
-	case local.ShouldConflict() || remote.ShouldConflict():
-		return "conflict"
 	case local.IsDeleted() && remote.IsDeleted():
 		return "same"
 	case local.IsDeleted():
 		return "deleted-local"
 	case remote.IsDeleted():
 		return "deleted-remote"
+	case compareHasDisplayConflict(local) || compareHasDisplayConflict(remote):
+		return "conflict"
 	case local.Type != remote.Type:
 		return "type-changed"
 	case local.IsEquivalent(remote, modTimeWindow):
@@ -225,6 +225,11 @@ func compareEntryStatus(localOK, remoteOK bool, local, remote protocol.FileInfo,
 	default:
 		return "modified"
 	}
+}
+
+func compareHasDisplayConflict(fi protocol.FileInfo) bool {
+	flags := fi.LocalFlags &^ (protocol.FlagLocalReceiveOnly | protocol.FlagLocalManualPublish)
+	return flags&protocol.LocalConflictFlags != 0
 }
 
 func markRenameCandidates(entries []CompareEntry) {

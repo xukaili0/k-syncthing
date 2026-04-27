@@ -120,3 +120,64 @@ func TestPublishFolderSelectedClearsPendingFlagAndPromotesGlobal(t *testing.T) {
 		t.Fatalf("expected global size 42 after publish, got %d", global.Size)
 	}
 }
+
+func TestPendingPublishFolderFilesShowsRenameCandidatesForMove(t *testing.T) {
+	w, fcfg := newDefaultCfgWrapper(t)
+	_, _ = w.Modify(func(cfg *config.Configuration) {
+		folder, _, ok := cfg.Folder(fcfg.ID)
+		if !ok {
+			t.Fatal("folder missing")
+		}
+		folder.ManualPublish = true
+		cfg.SetFolder(folder)
+	})
+
+	m := setupModel(t, w)
+
+	base := protocol.FileInfo{
+		Name:       "old/report.pdf",
+		Type:       protocol.FileInfoTypeFile,
+		Size:       99,
+		ModifiedS:  1,
+		ModifiedBy: myID.Short(),
+		BlocksHash: []byte("report-hash"),
+		Version:    protocol.Vector{}.Update(myID.Short()),
+	}
+	must(t, m.sdb.Update(fcfg.ID, protocol.LocalDeviceID, []protocol.FileInfo{base}))
+
+	deleted := base
+	deleted.Deleted = true
+	deleted.Size = 0
+	deleted.PreviousBlocksHash = []byte("report-hash")
+	deleted.Version = deleted.Version.Update(myID.Short())
+	deleted.LocalFlags = protocol.FlagLocalManualPublish
+
+	moved := base
+	moved.Name = "archive/report.pdf"
+	moved.Version = moved.Version.Update(myID.Short())
+	moved.LocalFlags = protocol.FlagLocalManualPublish
+
+	must(t, m.sdb.Update(fcfg.ID, protocol.LocalDeviceID, []protocol.FileInfo{deleted, moved}))
+
+	result, err := m.PendingPublishFolderFiles(fcfg.ID, PendingPublishOptions{})
+	must(t, err)
+
+	if len(result.Entries) != 2 {
+		t.Fatalf("expected 2 pending publish entries, got %d", len(result.Entries))
+	}
+
+	got := map[string]PendingPublishEntry{}
+	for _, entry := range result.Entries {
+		got[entry.Path] = entry
+	}
+
+	if got["old/report.pdf"].RenameCandidate != "archive/report.pdf" {
+		t.Fatalf("expected old path rename candidate, got %q", got["old/report.pdf"].RenameCandidate)
+	}
+	if got["archive/report.pdf"].RenameCandidate != "old/report.pdf" {
+		t.Fatalf("expected new path rename candidate, got %q", got["archive/report.pdf"].RenameCandidate)
+	}
+	if result.Entries[0].Path != "old/report.pdf" || result.Entries[1].Path != "archive/report.pdf" {
+		t.Fatalf("expected rename pair to stay grouped in display order, got %q then %q", result.Entries[0].Path, result.Entries[1].Path)
+	}
+}

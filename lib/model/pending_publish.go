@@ -8,6 +8,7 @@ package model
 
 import (
 	"bytes"
+	"path"
 	"slices"
 
 	"github.com/syncthing/syncthing/lib/config"
@@ -30,11 +31,12 @@ type PendingPublishOptions struct {
 }
 
 type PendingPublishEntry struct {
-	Path       string
-	Action     string
-	Local      *protocol.FileInfo
-	Global     *protocol.FileInfo
-	CanPublish bool
+	Path            string
+	Action          string
+	Local           *protocol.FileInfo
+	Global          *protocol.FileInfo
+	RenameCandidate string
+	CanPublish      bool
 }
 
 type PendingPublishResult struct {
@@ -136,6 +138,8 @@ func buildPendingPublishEntries(m *model, folder string, localFiles map[string]p
 		entries = append(entries, entry)
 	}
 
+	markPendingPublishRenameCandidates(entries)
+	sortPendingPublishEntries(entries)
 	return entries
 }
 
@@ -176,6 +180,195 @@ func filterPendingPublishEntries(entries []PendingPublishEntry, view string) []P
 		}
 	}
 	return filtered
+}
+
+func markPendingPublishRenameCandidates(entries []PendingPublishEntry) {
+	type entryRef struct {
+		index int
+		path  string
+	}
+
+	deletesByHash := make(map[string][]entryRef)
+	addsByHash := make(map[string][]entryRef)
+
+	for i, entry := range entries {
+		hash, ok := pendingPublishComparableHash(entry)
+		if !ok {
+			continue
+		}
+
+		switch entry.Action {
+		case PendingPublishViewDelete:
+			deletesByHash[string(hash)] = append(deletesByHash[string(hash)], entryRef{index: i, path: entry.Path})
+		case PendingPublishViewAdded:
+			addsByHash[string(hash)] = append(addsByHash[string(hash)], entryRef{index: i, path: entry.Path})
+		}
+	}
+
+	for hash, deletes := range deletesByHash {
+		adds, ok := addsByHash[hash]
+		if !ok {
+			continue
+		}
+
+		slices.SortFunc(deletes, func(a, b entryRef) int {
+			return bytes.Compare([]byte(a.path), []byte(b.path))
+		})
+		slices.SortFunc(adds, func(a, b entryRef) int {
+			return bytes.Compare([]byte(a.path), []byte(b.path))
+		})
+
+		limit := min(len(deletes), len(adds))
+		for i := 0; i < limit; i++ {
+			deleteRef := deletes[i]
+			addRef := adds[i]
+			if !pendingPublishComparableSizesMatch(entries[deleteRef.index], entries[addRef.index]) {
+				continue
+			}
+			entries[deleteRef.index].RenameCandidate = addRef.path
+			entries[addRef.index].RenameCandidate = deleteRef.path
+		}
+	}
+
+	matchPendingPublishRenameFallback(entries)
+}
+
+func pendingPublishComparableHash(entry PendingPublishEntry) ([]byte, bool) {
+	if entry.Local == nil {
+		return nil, false
+	}
+
+	switch entry.Action {
+	case PendingPublishViewDelete:
+		if len(entry.Local.PreviousBlocksHash) > 0 {
+			return entry.Local.PreviousBlocksHash, true
+		}
+		if entry.Global != nil && len(entry.Global.BlocksHash) > 0 {
+			return entry.Global.BlocksHash, true
+		}
+	case PendingPublishViewAdded:
+		if !entry.Local.IsDeleted() && len(entry.Local.BlocksHash) > 0 {
+			return entry.Local.BlocksHash, true
+		}
+	}
+
+	return nil, false
+}
+
+func pendingPublishComparableSize(entry PendingPublishEntry) int64 {
+	if entry.Local == nil {
+		return 0
+	}
+
+	switch entry.Action {
+	case PendingPublishViewDelete:
+		if entry.Global != nil {
+			return entry.Global.FileSize()
+		}
+		return 0
+	case PendingPublishViewAdded:
+		return entry.Local.FileSize()
+	default:
+		return 0
+	}
+}
+
+func pendingPublishComparableSizesMatch(oldEntry, newEntry PendingPublishEntry) bool {
+	oldSize := pendingPublishComparableSize(oldEntry)
+	newSize := pendingPublishComparableSize(newEntry)
+	if oldSize == 0 || newSize == 0 {
+		return true
+	}
+	return oldSize == newSize
+}
+
+func matchPendingPublishRenameFallback(entries []PendingPublishEntry) {
+	type entryRef struct {
+		index int
+		path  string
+	}
+
+	deletesByBase := make(map[string][]entryRef)
+	addsByBase := make(map[string][]entryRef)
+
+	for i, entry := range entries {
+		if entry.RenameCandidate != "" {
+			continue
+		}
+
+		base := path.Base(entry.Path)
+		switch entry.Action {
+		case PendingPublishViewDelete:
+			deletesByBase[base] = append(deletesByBase[base], entryRef{index: i, path: entry.Path})
+		case PendingPublishViewAdded:
+			addsByBase[base] = append(addsByBase[base], entryRef{index: i, path: entry.Path})
+		}
+	}
+
+	for base, deletes := range deletesByBase {
+		adds, ok := addsByBase[base]
+		if !ok {
+			continue
+		}
+
+		slices.SortFunc(deletes, func(a, b entryRef) int {
+			return bytes.Compare([]byte(a.path), []byte(b.path))
+		})
+		slices.SortFunc(adds, func(a, b entryRef) int {
+			return bytes.Compare([]byte(a.path), []byte(b.path))
+		})
+
+		limit := min(len(deletes), len(adds))
+		for i := 0; i < limit; i++ {
+			deleteRef := deletes[i]
+			addRef := adds[i]
+			if !pendingPublishComparableSizesMatch(entries[deleteRef.index], entries[addRef.index]) {
+				continue
+			}
+			entries[deleteRef.index].RenameCandidate = addRef.path
+			entries[addRef.index].RenameCandidate = deleteRef.path
+		}
+	}
+}
+
+func sortPendingPublishEntries(entries []PendingPublishEntry) {
+	slices.SortStableFunc(entries, func(a, b PendingPublishEntry) int {
+		groupA := pendingPublishGroupKey(a)
+		groupB := pendingPublishGroupKey(b)
+		if c := bytes.Compare([]byte(groupA), []byte(groupB)); c != 0 {
+			return c
+		}
+
+		if c := cmpPendingPublishGroupRank(a) - cmpPendingPublishGroupRank(b); c != 0 {
+			return c
+		}
+
+		return bytes.Compare([]byte(a.Path), []byte(b.Path))
+	})
+}
+
+func pendingPublishGroupKey(entry PendingPublishEntry) string {
+	if entry.RenameCandidate == "" {
+		return entry.Path
+	}
+	if entry.Path < entry.RenameCandidate {
+		return entry.Path
+	}
+	return entry.RenameCandidate
+}
+
+func cmpPendingPublishGroupRank(entry PendingPublishEntry) int {
+	if entry.RenameCandidate == "" {
+		return 0
+	}
+	switch entry.Action {
+	case PendingPublishViewDelete:
+		return 0
+	case PendingPublishViewAdded:
+		return 1
+	default:
+		return 2
+	}
 }
 
 func folderTypeCanPublish(t config.FolderType) bool {

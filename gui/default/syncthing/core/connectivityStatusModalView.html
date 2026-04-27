@@ -22,6 +22,9 @@
       </div>
     </div>
     <div ng-switch-default><!-- discovery methods -->
+      <div class="alert alert-info">
+        设备发现是持续进行的后台过程，不是“一次完成就结束”。这里显示的是当前可用的发现方式，以及哪些方式失败了。
+      </div>
       <p translate ng-if="discoveryRunning.length == 0">
         This device cannot automatically discover other devices or announce its own address to be found by others.  Only devices with statically configured addresses can connect.
       </p>

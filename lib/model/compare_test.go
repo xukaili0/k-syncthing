@@ -131,6 +131,25 @@ func TestFilterCompareEntries(t *testing.T) {
 	}
 }
 
+func TestBuildCompareEntriesDoesNotTreatManualPolicyFlagsAsConflict(t *testing.T) {
+	localDeleted := testCompareDeletedFile("file.zip", 200)
+	localDeleted.LocalFlags = protocol.FlagLocalReceiveOnly
+
+	remoteFile := testCompareFile("file.zip", 96, 100, []byte("remote"))
+
+	entries := buildCompareEntries(
+		map[string]protocol.FileInfo{"file.zip": localDeleted},
+		map[string]protocol.FileInfo{"file.zip": remoteFile},
+		0,
+	)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Status != "deleted-local" {
+		t.Fatalf("expected deleted-local instead of conflict, got %q", entries[0].Status)
+	}
+}
+
 func testCompareFile(name string, size int64, modifiedS int64, hash []byte) protocol.FileInfo {
 	return protocol.FileInfo{
 		Name:       name,

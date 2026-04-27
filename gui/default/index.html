@@ -773,6 +773,17 @@
                       </td>
                     </tr>
                     <tr>
+                      <th><span class="fas fa-fw fa-rotate"></span>&nbsp;<span>界面刷新</span></th>
+                      <td class="text-right">
+                        <div class="form-inline pull-right">
+                          <label class="small text-muted" style="margin-right: 6px;">主页面</label>
+                          <select class="form-control input-sm" style="width: auto;" ng-model="uiRefreshSettings.mainSeconds" ng-change="applyUIRefreshSettings()" ng-options="option as (option + ' 秒') for option in uiRefreshChoices"></select>
+                          <label class="small text-muted" style="margin: 0 6px 0 10px;">审核窗口</label>
+                          <select class="form-control input-sm" style="width: auto;" ng-model="uiRefreshSettings.modalSeconds" ng-change="applyUIRefreshSettings()" ng-options="option as (option + ' 秒') for option in uiRefreshChoices"></select>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
                       <th><span class="far fa-fw fa-clock"></span>&nbsp;<span translate>Uptime</span></th>
                       <td class="text-right">{{system.uptime | duration:"m"}}</td>
                     </tr>
