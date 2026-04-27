@@ -28,6 +28,7 @@ type indexHandler struct {
 	downloads                *deviceDownloadState
 	folder                   string
 	folderIsReceiveEncrypted bool
+	folderManualPublish      bool
 	evLogger                 events.Logger
 
 	// We track the latest / highest sequence number in two ways for two
@@ -133,6 +134,7 @@ func newIndexHandler(conn protocol.Connection, downloads *deviceDownloadState, f
 		downloads:                downloads,
 		folder:                   folder.ID,
 		folderIsReceiveEncrypted: folder.Type == config.FolderTypeReceiveEncrypted,
+		folderManualPublish:      folder.ManualPublish,
 		localPrevSequence:        startSequence,
 		sentPrevSequence:         startSequence,
 		evLogger:                 evLogger,
@@ -236,10 +238,11 @@ func (s *indexHandler) Serve(ctx context.Context) (err error) {
 
 // resume might be called because the folder was actually resumed, or just
 // because the folder config changed (and thus the runner and potentially fset).
-func (s *indexHandler) resume(runner service) {
+func (s *indexHandler) resume(runner service, manualPublish bool) {
 	s.cond.L.Lock()
 	s.paused = false
 	s.runner = runner
+	s.folderManualPublish = manualPublish
 	s.cond.Broadcast()
 	s.cond.L.Unlock()
 }
@@ -341,6 +344,9 @@ func (s *indexHandler) sendIndexTo(ctx context.Context) error {
 		// mustn't ever send locally changed file infos. Those aren't
 		// encrypted and thus would be a protocol error at the remote.
 		if s.folderIsReceiveEncrypted && fi.IsReceiveOnlyChanged() {
+			continue
+		}
+		if s.folderManualPublish && fi.IsManualPublishPending() {
 			continue
 		}
 
@@ -483,6 +489,7 @@ func prepareFileInfoForIndex(f protocol.FileInfo) protocol.FileInfo {
 	if f.IsReceiveOnlyChanged() {
 		f.Version = protocol.Vector{}
 	}
+	f.LocalFlags &^= protocol.FlagLocalManualPublish
 	// The trailer with the encrypted fileinfo is device local, announce the size without it to remotes.
 	f.Size -= int64(f.EncryptionTrailerSize)
 	return f
@@ -652,7 +659,7 @@ func (r *indexHandlerRegistry) folderRunningLocked(folder config.FolderConfigura
 		l.Debugf("Started index handler for device %v and folder %v in resume", r.conn.DeviceID().Short(), folder.ID)
 	} else if isOk {
 		l.Debugf("Resuming index handler for device %v and folder %v", r.conn.DeviceID().Short(), folder)
-		is.resume(runner)
+		is.resume(runner, folder.ManualPublish)
 	} else {
 		l.Debugf("Not resuming index handler for device %v and folder %v as none is paused and there is no start info", r.conn.DeviceID().Short(), folder.ID)
 	}

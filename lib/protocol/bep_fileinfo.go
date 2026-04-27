@@ -31,16 +31,17 @@ const (
 	FlagLocalGlobal        FlagLocal = 1 << 4 // 16: This is the global file version
 	FlagLocalNeeded        FlagLocal = 1 << 5 // 32: We need this file
 	FlagLocalRemoteInvalid FlagLocal = 1 << 6 // 64: The remote marked this as invalid
+	FlagLocalManualPublish FlagLocal = 1 << 7 // 128: Local change waiting for manual publish approval
 
 	// Flags that should result in the Invalid bit on outgoing updates (or had it on ingoing ones)
-	LocalInvalidFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan | FlagLocalReceiveOnly | FlagLocalRemoteInvalid
+	LocalInvalidFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan | FlagLocalReceiveOnly | FlagLocalRemoteInvalid | FlagLocalManualPublish
 
 	// Flags that should result in a file being in conflict with its
 	// successor, due to us not having an up to date picture of its state on
 	// disk.
-	LocalConflictFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalReceiveOnly
+	LocalConflictFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalReceiveOnly | FlagLocalManualPublish
 
-	LocalAllFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan | FlagLocalReceiveOnly | FlagLocalGlobal | FlagLocalNeeded | FlagLocalRemoteInvalid
+	LocalAllFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan | FlagLocalReceiveOnly | FlagLocalGlobal | FlagLocalNeeded | FlagLocalRemoteInvalid | FlagLocalManualPublish
 )
 
 // localFlagBitNames maps flag values to characters which can be used to
@@ -53,6 +54,7 @@ var localFlagBitNames = map[FlagLocal]string{
 	FlagLocalGlobal:        "G",
 	FlagLocalNeeded:        "n",
 	FlagLocalRemoteInvalid: "v",
+	FlagLocalManualPublish: "p",
 }
 
 func (f FlagLocal) IsInvalid() bool {
@@ -374,6 +376,10 @@ func (f FileInfo) MustRescan() bool {
 
 func (f FileInfo) IsReceiveOnlyChanged() bool {
 	return f.LocalFlags&FlagLocalReceiveOnly != 0
+}
+
+func (f FileInfo) IsManualPublishPending() bool {
+	return f.LocalFlags&FlagLocalManualPublish != 0
 }
 
 func (f FileInfo) IsDirectory() bool {

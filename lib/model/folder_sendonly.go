@@ -30,6 +30,9 @@ func newSendOnlyFolder(model *model, ignores *ignore.Matcher, cfg config.FolderC
 	f := &sendOnlyFolder{
 		folder: newFolder(model, ignores, cfg, evLogger, ioLimiter, nil),
 	}
+	if cfg.ManualPublish {
+		f.localFlags = protocol.FlagLocalManualPublish
+	}
 	f.puller = f
 	return f
 }

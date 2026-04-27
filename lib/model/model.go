@@ -104,6 +104,7 @@ type Model interface {
 	GlobalSize(folder string) (db.Counts, error)
 	NeedSize(folder string, device protocol.DeviceID) (db.Counts, error)
 	ReceiveOnlySize(folder string) (db.Counts, error)
+	ManualPublishPendingSize(folder string) (db.Counts, error)
 	Sequence(folder string, device protocol.DeviceID) (int64, error)
 	AllGlobalFiles(folder string) (iter.Seq[db.FileMetadata], func() error)
 	RemoteSequences(folder string) (map[protocol.DeviceID]int64, error)
@@ -111,10 +112,12 @@ type Model interface {
 	NeedFolderFiles(folder string, page, perpage int) ([]protocol.FileInfo, []protocol.FileInfo, []protocol.FileInfo, error)
 	RemoteNeedFolderFiles(folder string, device protocol.DeviceID, page, perpage int) ([]protocol.FileInfo, error)
 	LocalChangedFolderFiles(folder string, page, perpage int) ([]protocol.FileInfo, error)
+	PendingPublishFolderFiles(folder string, opts PendingPublishOptions) (PendingPublishResult, error)
 	CompareFolderFiles(folder string, device protocol.DeviceID, opts CompareOptions) (CompareResult, error)
 	FolderProgressBytesCompleted(folder string) int64
 	TriggerFolderPull(folder string) error
 	TriggerFolderPullSelected(folder string, files []string) error
+	PublishFolderSelected(folder string, files []string) error
 
 	CurrentFolderFile(folder string, file string) (protocol.FileInfo, bool, error)
 	CurrentGlobalFile(folder string, file string) (protocol.FileInfo, bool, error)
@@ -545,6 +548,9 @@ func (m *model) restartFolder(from, to config.FolderConfiguration, cacheIgnoredF
 	m.cleanupFolderLocked(from)
 	if !to.Paused {
 		m.addAndStartFolderLocked(to, cacheIgnoredFiles)
+		if err := m.normalizeManualPublishState(to.ID, to); err != nil {
+			return err
+		}
 	}
 
 	runner, _ := m.folderRunners.Get(to.ID)
@@ -570,6 +576,9 @@ func (m *model) newFolder(cfg config.FolderConfiguration, cacheIgnoredFiles bool
 	defer m.mut.Unlock()
 
 	m.addAndStartFolderLocked(cfg, cacheIgnoredFiles)
+	if err := m.normalizeManualPublishState(cfg.ID, cfg); err != nil {
+		return err
+	}
 
 	// Cluster configs might be received and processed before reaching this
 	// point, i.e. before the folder is started. If that's the case, start
@@ -979,6 +988,10 @@ func (m *model) NeedSize(folder string, device protocol.DeviceID) (db.Counts, er
 
 func (m *model) ReceiveOnlySize(folder string) (db.Counts, error) {
 	return m.sdb.CountReceiveOnlyChanged(folder)
+}
+
+func (m *model) ManualPublishPendingSize(folder string) (db.Counts, error) {
+	return m.sdb.CountManualPublishPending(folder)
 }
 
 func (m *model) Sequence(folder string, device protocol.DeviceID) (int64, error) {

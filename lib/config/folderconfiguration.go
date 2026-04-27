@@ -74,6 +74,7 @@ type FolderConfiguration struct {
 	DisableSparseFiles      bool                        `json:"disableSparseFiles" xml:"disableSparseFiles"`
 	Paused                  bool                        `json:"paused" xml:"paused"`
 	ManualSync              bool                        `json:"manualSync" xml:"manualSync"`
+	ManualPublish           bool                        `json:"manualPublish" xml:"manualPublish"`
 	MarkerName              string                      `json:"markerName" xml:"markerName"`
 	CopyOwnershipFromParent bool                        `json:"copyOwnershipFromParent" xml:"copyOwnershipFromParent"`
 	RawModTimeWindowS       int                         `json:"modTimeWindowS" xml:"modTimeWindowS"`

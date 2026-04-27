@@ -74,6 +74,7 @@ type DB interface {
 	CountLocal(folder string, device protocol.DeviceID) (Counts, error)
 	CountNeed(folder string, device protocol.DeviceID) (Counts, error)
 	CountReceiveOnlyChanged(folder string) (Counts, error)
+	CountManualPublishPending(folder string) (Counts, error)
 
 	// Index IDs
 	DropAllIndexIDs() error
@@ -125,6 +126,10 @@ func (f *FileMetadata) ModTime() time.Time {
 
 func (f *FileMetadata) IsReceiveOnlyChanged() bool {
 	return f.LocalFlags&protocol.FlagLocalReceiveOnly != 0
+}
+
+func (f *FileMetadata) IsManualPublishPending() bool {
+	return f.LocalFlags&protocol.FlagLocalManualPublish != 0
 }
 
 func (f *FileMetadata) IsDirectory() bool {

@@ -103,6 +103,13 @@ type FolderSummary struct {
 	ReceiveOnlyChangedBytes       int64 `json:"receiveOnlyChangedBytes"`
 	ReceiveOnlyTotalItems         int   `json:"receiveOnlyTotalItems"`
 
+	ManualPublishPendingFiles       int   `json:"manualPublishPendingFiles"`
+	ManualPublishPendingDirectories int   `json:"manualPublishPendingDirectories"`
+	ManualPublishPendingSymlinks    int   `json:"manualPublishPendingSymlinks"`
+	ManualPublishPendingDeletes     int   `json:"manualPublishPendingDeletes"`
+	ManualPublishPendingBytes       int64 `json:"manualPublishPendingBytes"`
+	ManualPublishPendingTotalItems  int   `json:"manualPublishPendingTotalItems"`
+
 	InSyncFiles int   `json:"inSyncFiles"`
 	InSyncBytes int64 `json:"inSyncBytes"`
 
@@ -121,7 +128,7 @@ type FolderSummary struct {
 func (c *folderSummaryService) Summary(folder string) (*FolderSummary, error) {
 	res := new(FolderSummary)
 
-	var local, global, need, ro db.Counts
+	var local, global, need, ro, mp db.Counts
 	var ourSeq int64
 	var remoteSeq map[protocol.DeviceID]int64
 	errs, err := c.model.FolderErrors(folder)
@@ -130,6 +137,7 @@ func (c *folderSummaryService) Summary(folder string) (*FolderSummary, error) {
 		local, _ = c.model.LocalSize(folder, protocol.LocalDeviceID)
 		need, _ = c.model.NeedSize(folder, protocol.LocalDeviceID)
 		ro, _ = c.model.ReceiveOnlySize(folder)
+		mp, _ = c.model.ManualPublishPendingSize(folder)
 		ourSeq, _ = c.model.Sequence(folder, protocol.LocalDeviceID)
 		remoteSeq, _ = c.model.RemoteSequences(folder)
 	}
@@ -172,6 +180,14 @@ func (c *folderSummaryService) Summary(folder string) (*FolderSummary, error) {
 		res.ReceiveOnlyChangedDeletes = ro.Deleted
 		res.ReceiveOnlyChangedBytes = ro.Bytes
 		res.ReceiveOnlyTotalItems = ro.TotalItems()
+	}
+	if haveFcfg && fcfg.ManualPublish && (fcfg.Type == config.FolderTypeSendOnly || fcfg.Type == config.FolderTypeSendReceive) {
+		res.ManualPublishPendingFiles = mp.Files
+		res.ManualPublishPendingDirectories = mp.Directories
+		res.ManualPublishPendingSymlinks = mp.Symlinks
+		res.ManualPublishPendingDeletes = mp.Deleted
+		res.ManualPublishPendingBytes = mp.Bytes
+		res.ManualPublishPendingTotalItems = mp.TotalItems()
 	}
 
 	res.InSyncFiles, res.InSyncBytes = global.Files-need.Files, global.Bytes-need.Bytes

@@ -221,6 +221,17 @@ func (s *DB) AllNeededGlobalFiles(folder string, device protocol.DeviceID, order
 	return fdb.AllNeededGlobalFiles(device, order, limit, offset)
 }
 
+func (s *DB) CountManualPublishPending(folder string) (db.Counts, error) {
+	fdb, err := s.getFolderDB(folder, false)
+	if errors.Is(err, errNoSuchFolder) {
+		return db.Counts{}, nil
+	}
+	if err != nil {
+		return db.Counts{}, err
+	}
+	return fdb.CountManualPublishPending()
+}
+
 func (s *DB) DropAllFiles(folder string, device protocol.DeviceID) error {
 	fdb, err := s.getFolderDB(folder, false)
 	if errors.Is(err, errNoSuchFolder) {

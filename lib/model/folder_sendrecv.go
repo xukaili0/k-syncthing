@@ -142,6 +142,9 @@ func newSendReceiveFolder(model *model, ignores *ignore.Matcher, cfg config.Fold
 		blockPullReorderer: newBlockPullReorderer(cfg.BlockPullOrder, model.id, cfg.DeviceIDs()),
 		writeLimiter:       semaphore.New(cfg.MaxConcurrentWrites),
 	}
+	if cfg.ManualPublish {
+		f.localFlags = protocol.FlagLocalManualPublish
+	}
 	f.puller = f
 
 	if f.Copiers == 0 {

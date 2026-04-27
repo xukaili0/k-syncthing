@@ -62,6 +62,18 @@ func (s *folderDB) CountReceiveOnlyChanged() (db.Counts, error) {
 	return summarizeCounts(res), nil
 }
 
+func (s *folderDB) CountManualPublishPending() (db.Counts, error) {
+	var res []countsRow
+	err := s.stmt(`
+		SELECT s.type, s.count, s.size, s.local_flags, s.deleted FROM counts s
+		WHERE local_flags & {{.FlagLocalManualPublish}} != 0
+	`).Select(&res)
+	if err != nil {
+		return db.Counts{}, wrap(err)
+	}
+	return summarizeCounts(res), nil
+}
+
 func (s *folderDB) needSizeLocal() (db.Counts, error) {
 	// The need size for the local device is the sum of entries with the
 	// need bit set.

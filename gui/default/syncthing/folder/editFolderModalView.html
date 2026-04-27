@@ -275,6 +275,23 @@
                 Cannot be enabled when the folder type is "{%foldertype%}".
               </p>
             </div>
+            <div class="col-md-6 form-group">
+              <label>
+                <input type="checkbox" ng-disabled="currentFolder.type == 'receiveonly' || currentFolder.type == 'receiveencrypted'" ng-model="currentFolder.manualPublish" /> <span>手动审核发布（以当前设备为基准）</span>
+              </label>
+              <p class="help-block">
+                本地新增、修改、删除仍会被扫描到，但不会立刻对其他设备公开。你需要先在“待发布差异”中查看变化，再手动选择哪些路径要发布出去。
+              </p>
+              <p class="help-block">
+                这个开关只控制“当前设备把自己的变化什么时候公开给别人”。远端是否自动接收这些变化，仍由远端自己的文件夹类型和接收模式决定。
+              </p>
+              <p class="help-block">
+                这特别适合“手机先挑文件，再备份到电脑”这类发送端筛选场景。
+              </p>
+              <p class="help-block" ng-if="has(['receiveonly', 'receiveencrypted'], currentFolder.type)" translate translate-value-foldertype="{{currentFolder.type === 'receiveonly' ? ('Receive Only' | translate) : currentFolder.type === 'receiveencrypted' ? ('Receive Encrypted' | translate) : ''}}">
+                Cannot be enabled when the folder type is "{%foldertype%}".
+              </p>
+            </div>
           </div>
 
           <div class="row">

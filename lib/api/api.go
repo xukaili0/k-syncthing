@@ -259,6 +259,7 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/compare", s.getDBCompare)                   // device folder [perpage] [page] [prefix] [view]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/remoteneed", s.getDBRemoteNeed)             // device folder [perpage] [page]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/localchanged", s.getDBLocalChanged)         // folder [perpage] [page]
+	restMux.HandlerFunc(http.MethodGet, "/rest/db/pendingpublish", s.getDBPendingPublish)     // folder [perpage] [page] [prefix] [view]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/status", s.getDBStatus)                     // folder
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/browse", s.getDBBrowse)                     // folder [prefix] [dirsonly] [levels]
 	restMux.HandlerFunc(http.MethodGet, "/rest/folder/versions", s.getFolderVersions)         // folder
@@ -290,6 +291,7 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/prio", s.postDBPrio)                          // folder file
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/pull", s.postDBPull)                          // folder
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/pullselected", s.postDBPullSelected)          // folder <body>
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/publishselected", s.postDBPublishSelected)    // folder <body>
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/ignores", s.postDBIgnores)                    // folder
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/override", s.postDBOverride)                  // folder
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/revert", s.postDBRevert)                      // folder
@@ -896,6 +898,34 @@ func (s *service) getDBLocalChanged(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *service) getDBPendingPublish(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+	folder := qs.Get("folder")
+	page, perpage := getPagingParams(qs)
+
+	result, err := s.model.PendingPublishFolderFiles(folder, model.PendingPublishOptions{
+		Page:    page,
+		PerPage: perpage,
+		Prefix:  qs.Get("prefix"),
+		View:    qs.Get("view"),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	sendJSON(w, map[string]interface{}{
+		"entries":          toJSONPendingPublishEntrySlice(result.Entries),
+		"page":             result.Page,
+		"perpage":          result.PerPage,
+		"total":            result.Total,
+		"manualPublish":    result.ManualPublish,
+		"folderCanPublish": result.FolderCanPublish,
+		"view":             result.RequestedView,
+		"prefix":           result.RequestedPrefix,
+	})
+}
+
 func (s *service) getDBCompare(w http.ResponseWriter, r *http.Request) {
 	qs := r.URL.Query()
 
@@ -930,6 +960,40 @@ func (s *service) getDBCompare(w http.ResponseWriter, r *http.Request) {
 		"device":          result.RemoteDeviceID.String(),
 		"view":            result.RequestedView,
 		"prefix":          result.RequestedPrefix,
+	})
+}
+
+func (s *service) postDBPublishSelected(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+	folder := qs.Get("folder")
+
+	bs, err := io.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var body struct {
+		Files []string `json:"files"`
+	}
+	if err := json.Unmarshal(bs, &body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := s.model.PublishFolderSelected(folder, body.Files); err != nil {
+		if isFolderNotFound(err) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]any{
+		"ok":    true,
+		"files": body.Files,
 	})
 }
 
@@ -1843,10 +1907,19 @@ func toJSONCompareEntrySlice(entries []model.CompareEntry) []jsonCompareEntry {
 	return res
 }
 
+func toJSONPendingPublishEntrySlice(entries []model.PendingPublishEntry) []jsonPendingPublishEntry {
+	res := make([]jsonPendingPublishEntry, len(entries))
+	for i, entry := range entries {
+		res[i] = jsonPendingPublishEntry(entry)
+	}
+	return res
+}
+
 // Type wrappers for nice JSON serialization
 
 type jsonFileInfo protocol.FileInfo
 type jsonCompareEntry model.CompareEntry
+type jsonPendingPublishEntry model.PendingPublishEntry
 
 func (f jsonFileInfo) MarshalJSON() ([]byte, error) {
 	m := fileIntfJSONMap(protocol.FileInfo(f))
@@ -1867,6 +1940,22 @@ func (e jsonCompareEntry) MarshalJSON() ([]byte, error) {
 	}
 	if entry.Remote != nil {
 		out["remote"] = jsonFileInfo(*entry.Remote)
+	}
+	return json.Marshal(out)
+}
+
+func (e jsonPendingPublishEntry) MarshalJSON() ([]byte, error) {
+	entry := model.PendingPublishEntry(e)
+	out := map[string]interface{}{
+		"path":       entry.Path,
+		"action":     entry.Action,
+		"canPublish": entry.CanPublish,
+	}
+	if entry.Local != nil {
+		out["local"] = jsonFileInfo(*entry.Local)
+	}
+	if entry.Global != nil {
+		out["global"] = jsonFileInfo(*entry.Global)
 	}
 	return json.Marshal(out)
 }

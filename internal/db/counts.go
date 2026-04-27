@@ -55,6 +55,9 @@ func (c Counts) String() string {
 	if c.LocalFlags&protocol.FlagLocalReceiveOnly != 0 {
 		flags.WriteString("Recvonly")
 	}
+	if c.LocalFlags&protocol.FlagLocalManualPublish != 0 {
+		flags.WriteString("ManualPublish")
+	}
 	if c.LocalFlags&protocol.FlagLocalUnsupported != 0 {
 		flags.WriteString("Unsupported")
 	}

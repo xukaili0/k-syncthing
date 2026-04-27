@@ -13,6 +13,12 @@ angular.module('syncthing.core')
         var restarting = false;
         var restartExpectedFrom = 0;
         var restartExpectedUntil = 0;
+        var uiRefreshIntervalMs = 5000;
+        var compareAutoRefreshMs = 3000;
+        var publishReviewAutoRefreshMs = 3000;
+        var compareAutoRefreshPromise = null;
+        var publishReviewAutoRefreshPromise = null;
+        var modalRefreshPromise = null;
 
         function initController() {
             LocaleService.autoConfigLocale();
@@ -31,13 +37,68 @@ angular.module('syncthing.core')
                 return;
             }
 
-            setInterval($scope.refresh, 10000);
+            setInterval($scope.refresh, uiRefreshIntervalMs);
             Events.start();
         }
 
         function clearRestartExpectation() {
             restartExpectedFrom = 0;
             restartExpectedUntil = 0;
+        }
+
+        function cancelCompareAutoRefresh() {
+            if (compareAutoRefreshPromise) {
+                $timeout.cancel(compareAutoRefreshPromise);
+                compareAutoRefreshPromise = null;
+            }
+        }
+
+        function scheduleCompareAutoRefresh() {
+            cancelCompareAutoRefresh();
+            if (!$scope.compare.folder) {
+                return;
+            }
+            compareAutoRefreshPromise = $timeout(function () {
+                if ($scope.compare.folder) {
+                    $scope.refreshCompare($scope.compare.page, $scope.compare.perpage);
+                    scheduleCompareAutoRefresh();
+                }
+            }, compareAutoRefreshMs, false);
+        }
+
+        function cancelPublishReviewAutoRefresh() {
+            if (publishReviewAutoRefreshPromise) {
+                $timeout.cancel(publishReviewAutoRefreshPromise);
+                publishReviewAutoRefreshPromise = null;
+            }
+        }
+
+        function schedulePublishReviewAutoRefresh() {
+            cancelPublishReviewAutoRefresh();
+            if (!$scope.publishReview.folder) {
+                return;
+            }
+            publishReviewAutoRefreshPromise = $timeout(function () {
+                if ($scope.publishReview.folder) {
+                    $scope.refreshPendingPublish($scope.publishReview.page, $scope.publishReview.perpage);
+                    schedulePublishReviewAutoRefresh();
+                }
+            }, publishReviewAutoRefreshMs, false);
+        }
+
+        function scheduleOpenModalRefresh(delayMs) {
+            if (modalRefreshPromise) {
+                $timeout.cancel(modalRefreshPromise);
+            }
+            modalRefreshPromise = $timeout(function () {
+                modalRefreshPromise = null;
+                if ($scope.compare.folder) {
+                    $scope.refreshCompare($scope.compare.page, $scope.compare.perpage);
+                }
+                if ($scope.publishReview.folder) {
+                    $scope.refreshPendingPublish($scope.publishReview.page, $scope.publishReview.perpage);
+                }
+            }, delayMs || 300, false);
         }
 
         function setRestartExpectation(delayS) {
@@ -99,6 +160,7 @@ angular.module('syncthing.core')
         $scope.neededFolder = '';
         $scope.failed = {};
         $scope.localChanged = {};
+        $scope.publishReview = {};
         $scope.scanProgress = {};
         $scope.themes = [];
         $scope.globalChangeEvents = {};
@@ -321,6 +383,10 @@ angular.module('syncthing.core')
         $scope.$on(Events.LOCAL_INDEX_UPDATED, function (event, arg) {
             refreshFolderStats();
             refreshGlobalChanges();
+            if (($scope.compare.folder && arg.data.folder === $scope.compare.folder) ||
+                ($scope.publishReview.folder && arg.data.folder === $scope.publishReview.folder)) {
+                scheduleOpenModalRefresh(200);
+            }
         });
 
         $scope.$on(Events.DEVICE_DISCONNECTED, function (event, arg) {
@@ -329,6 +395,9 @@ angular.module('syncthing.core')
             }
             $scope.connections[arg.data.id].connected = false;
             refreshDeviceStats();
+            if ($scope.compare.folder && $scope.compare.deviceID === arg.data.id) {
+                scheduleOpenModalRefresh(200);
+            }
         });
 
         $scope.$on(Events.DEVICE_CONNECTED, function (event, arg) {
@@ -346,6 +415,17 @@ angular.module('syncthing.core')
                     _needBytes: 0,
                     _needItems: 0
                 };
+            }
+            if ($scope.compare.folder && $scope.compare.deviceID === arg.data.id) {
+                scheduleOpenModalRefresh(200);
+            }
+        });
+
+        $scope.$on(Events.REMOTE_INDEX_UPDATED, function (event, arg) {
+            if ($scope.compare.folder &&
+                arg.data.folder === $scope.compare.folder &&
+                arg.data.device === $scope.compare.deviceID) {
+                scheduleOpenModalRefresh(200);
             }
         });
 
@@ -890,6 +970,24 @@ angular.module('syncthing.core')
         }
         resetCompare();
 
+        function resetPublishReview() {
+            $scope.publishReview = {
+                folder: '',
+                folderLabel: '',
+                entries: [],
+                page: 1,
+                perpage: 25,
+                total: 0,
+                view: 'all',
+                prefix: '',
+                selected: {},
+                manualPublish: false,
+                folderCanPublish: false,
+                publishOperation: null,
+            };
+        }
+        resetPublishReview();
+
         function setDefaultTheme() {
             if (!document.getElementById("fallback-theme-css")) {
 
@@ -986,6 +1084,40 @@ angular.module('syncthing.core')
             }).error($scope.emitHTTPError);
         };
 
+        $scope.refreshPendingPublish = function (page, perpage) {
+            if (!$scope.publishReview.folder) {
+                return;
+            }
+
+            var url = urlbase + '/db/pendingpublish?folder=' + encodeURIComponent($scope.publishReview.folder);
+            url += '&page=' + page;
+            url += '&perpage=' + perpage;
+            url += '&view=' + encodeURIComponent($scope.publishReview.view);
+            if ($scope.publishReview.prefix) {
+                url += '&prefix=' + encodeURIComponent($scope.publishReview.prefix);
+            }
+
+            $http.get(url).success(function (data) {
+                var previousSelected = angular.copy($scope.publishReview.selected || {});
+                $scope.publishReview.entries = data.entries;
+                $scope.publishReview.page = data.page;
+                $scope.publishReview.perpage = data.perpage;
+                $scope.publishReview.total = data.total;
+                $scope.publishReview.manualPublish = !!data.manualPublish;
+                $scope.publishReview.folderCanPublish = !!data.folderCanPublish;
+                $scope.publishReview.selected = {};
+                data.entries.forEach(function (entry) {
+                    if (previousSelected[entry.path] && entry.canPublish) {
+                        $scope.publishReview.selected[entry.path] = true;
+                    }
+                });
+                if ($scope.publishReview.publishOperation && $scope.publishReview.publishOperation.state !== 'error') {
+                    $scope.publishReview.publishOperation.state = 'completed';
+                    $scope.publishReview.publishOperation.message = '待发布列表已刷新。已发布的条目现在对远端设备可见，远端会按自己的接收策略决定是否自动同步。';
+                }
+            }).error($scope.emitHTTPError);
+        };
+
         $scope.refreshCompare = function (page, perpage) {
             if (!$scope.compare.folder || !$scope.compare.deviceID) {
                 return;
@@ -1001,6 +1133,7 @@ angular.module('syncthing.core')
             }
 
             $http.get(url).success(function (data) {
+                var previousSelected = angular.copy($scope.compare.selected || {});
                 $scope.compare.entries = data.entries;
                 $scope.compare.page = data.page;
                 $scope.compare.perpage = data.perpage;
@@ -1009,6 +1142,11 @@ angular.module('syncthing.core')
                 $scope.compare.folderHasPuller = data.folderHasPuller;
                 $scope.compare.manualSync = !!data.manualSync;
                 $scope.compare.selected = {};
+                data.entries.forEach(function (entry) {
+                    if (previousSelected[entry.path] && entry.canPrioritize) {
+                        $scope.compare.selected[entry.path] = true;
+                    }
+                });
                 updateCompareSyncOperationStatus(false);
             }).error($scope.emitHTTPError);
         };
@@ -2331,6 +2469,9 @@ angular.module('syncthing.core')
             if ($scope.currentFolder.type === 'sendonly') {
                 $scope.currentFolder.manualSync = false;
             }
+            if ($scope.currentFolder.type === 'receiveonly' || $scope.currentFolder.type === 'receiveencrypted') {
+                $scope.currentFolder.manualPublish = false;
+            }
             $scope.setFSWatcherIntervalDefault();
         };
 
@@ -3146,8 +3287,10 @@ angular.module('syncthing.core')
             $scope.compare.device = devices[0];
             $scope.compare.deviceID = devices[0].deviceID;
             $scope.refreshCompare(1, $scope.compare.perpage);
+            scheduleCompareAutoRefresh();
 
             $('#compare').one('hidden.bs.modal', function () {
+                cancelCompareAutoRefresh();
                 resetCompare();
             });
             showModal('#compare');
@@ -3215,12 +3358,40 @@ angular.module('syncthing.core')
             showModal('#localChanged');
         };
 
+        $scope.showPublishReview = function (folder) {
+            resetPublishReview();
+            $scope.publishReview.folder = folder.id;
+            $scope.publishReview.folderLabel = folder.label || folder.id;
+            $scope.refreshPendingPublish(1, $scope.publishReview.perpage);
+            schedulePublishReviewAutoRefresh();
+            $('#publishReview').one('hidden.bs.modal', function () {
+                cancelPublishReviewAutoRefresh();
+                resetPublishReview();
+            });
+            showModal('#publishReview');
+        };
+
         $scope.hasReceiveOnlyChanged = function (folderCfg) {
             if (!folderCfg || ["receiveonly",  "receiveencrypted"].indexOf(folderCfg.type) === -1) {
                 return false;
             }
             var counts = $scope.model[folderCfg.id];
             return counts && counts.receiveOnlyTotalItems > 0;
+        };
+
+        $scope.folderCanPublish = function (folderCfg) {
+            if (!folderCfg) {
+                return false;
+            }
+            return folderCfg.type === 'sendreceive' || folderCfg.type === 'sendonly';
+        };
+
+        $scope.hasManualPublishPending = function (folderCfg) {
+            if (!$scope.folderCanPublish(folderCfg) || !folderCfg.manualPublish) {
+                return false;
+            }
+            var counts = $scope.model[folderCfg.id];
+            return counts && counts.manualPublishPendingTotalItems > 0;
         };
 
         $scope.compareDevices = function (folderCfg) {
@@ -3232,6 +3403,122 @@ angular.module('syncthing.core')
             }).filter(function (deviceCfg) {
                 return !!deviceCfg;
             }).sort(deviceCompare);
+        };
+
+        $scope.showCompareButtonLabel = function (folderCfg) {
+            if (folderCfg && folderCfg.manualSync) {
+                return '接收审核';
+            }
+            return '文件对比';
+        };
+
+        $scope.publishReviewDevices = function () {
+            var folderCfg = $scope.folders[$scope.publishReview.folder];
+            if (!folderCfg) {
+                return [];
+            }
+            return $scope.compareDevices(folderCfg);
+        };
+
+        $scope.publishReviewRemoteStateLabel = function (deviceID) {
+            var comp = $scope.completion[deviceID] && $scope.completion[deviceID][$scope.publishReview.folder];
+            if (!comp || !comp.remoteState) {
+                return '状态未知';
+            }
+            switch (comp.remoteState) {
+                case 'idle':
+                    return '远端空闲';
+                case 'syncing':
+                    return '远端同步中';
+                case 'scanning':
+                    return '远端扫描中';
+                case 'paused':
+                    return '远端文件夹已暂停';
+                case 'notSharing':
+                    return '远端尚未接受共享';
+                case 'cleaning':
+                    return '远端清理中';
+                default:
+                    return comp.remoteState;
+            }
+        };
+
+        $scope.publishReviewDeviceCompletion = function (deviceID) {
+            var comp = $scope.completion[deviceID] && $scope.completion[deviceID][$scope.publishReview.folder];
+            if (!comp || comp.completion === undefined) {
+                return '未知';
+            }
+            return comp.completion + '%';
+        };
+
+        $scope.pendingPublishActionLabel = function (entry) {
+            switch (entry.action) {
+                case 'added':
+                    return '待发布新增';
+                case 'delete':
+                    return '待发布删除';
+                case 'modified':
+                default:
+                    return '待发布修改';
+            }
+        };
+
+        $scope.pendingPublishActionClass = function (entry) {
+            switch (entry.action) {
+                case 'added':
+                    return 'text-success';
+                case 'delete':
+                    return 'text-muted';
+                case 'modified':
+                default:
+                    return 'text-warning';
+            }
+        };
+
+        $scope.pendingPublishSelectionCount = function () {
+            return Object.keys($scope.publishReview.selected).filter(function (path) {
+                return !!$scope.publishReview.selected[path];
+            }).length;
+        };
+
+        $scope.pendingPublishVisibleEntries = function () {
+            return $scope.publishReview.entries.filter(function (entry) {
+                return entry.canPublish;
+            });
+        };
+
+        $scope.clearPendingPublishSelection = function () {
+            $scope.publishReview.selected = {};
+        };
+
+        $scope.refreshPendingPublishResults = function () {
+            $scope.clearPendingPublishSelection();
+            $scope.refreshPendingPublish($scope.publishReview.page, $scope.publishReview.perpage);
+        };
+
+        $scope.selectVisiblePendingPublishEntries = function () {
+            $scope.publishReview.entries.forEach(function (entry) {
+                if (entry.canPublish) {
+                    $scope.publishReview.selected[entry.path] = true;
+                }
+            });
+        };
+
+        $scope.pendingPublishEntryInOperation = function (entry) {
+            if (!$scope.publishReview.publishOperation || !$scope.publishReview.publishOperation.pathSet) {
+                return false;
+            }
+            return !!$scope.publishReview.publishOperation.pathSet[entry.path];
+        };
+
+        $scope.pendingPublishEntryRowClass = function (entry) {
+            if ($scope.publishReview.selected[entry.path]) {
+                return 'info';
+            }
+            if ($scope.pendingPublishEntryInOperation(entry) && $scope.publishReview.publishOperation.state !== 'completed' && $scope.publishReview.publishOperation.state !== 'error') {
+                return 'warning';
+            }
+            return '';
         };
 
         $scope.compareStatusLabel = function (entry) {
@@ -3610,6 +3897,71 @@ angular.module('syncthing.core')
                 $scope.compare.selected[entry.path] = true;
             });
             syncCompareEntries(visibleEntries).catch($scope.emitHTTPError);
+        };
+
+        function setPendingPublishOperation(entries, state, message) {
+            var paths = entries.map(function (entry) {
+                return entry.path;
+            });
+            var pathSet = {};
+            paths.forEach(function (path) {
+                pathSet[path] = true;
+            });
+
+            $scope.publishReview.publishOperation = {
+                state: state,
+                message: message,
+                paths: paths,
+                pathSet: pathSet,
+                startedAt: new Date(),
+            };
+        }
+
+        function publishPendingEntries(entries) {
+            if (!entries || entries.length === 0) {
+                return $q.when();
+            }
+
+            setPendingPublishOperation(entries, 'submitting', '正在提交发布请求，请稍候...');
+            return $http.post(
+                urlbase + '/db/publishselected?folder=' + encodeURIComponent($scope.publishReview.folder),
+                { files: entries.map(function (entry) { return entry.path; }) }
+            ).then(function () {
+                if ($scope.publishReview.publishOperation) {
+                    $scope.publishReview.publishOperation.state = 'refreshing';
+                    $scope.publishReview.publishOperation.message = '本地索引已更新，正在刷新待发布列表...';
+                }
+                $scope.refreshPendingPublishResults();
+            }).catch(function (err) {
+                if ($scope.publishReview.publishOperation) {
+                    $scope.publishReview.publishOperation.state = 'error';
+                    $scope.publishReview.publishOperation.message = '提交发布请求失败，请稍后重试。';
+                }
+                return $q.reject(err);
+            });
+        }
+
+        $scope.publishPendingSelected = function () {
+            var selectedEntries = $scope.publishReview.entries.filter(function (entry) {
+                return $scope.publishReview.selected[entry.path] && entry.canPublish;
+            });
+            if (selectedEntries.length === 0) {
+                return;
+            }
+
+            publishPendingEntries(selectedEntries).catch($scope.emitHTTPError);
+        };
+
+        $scope.publishAllVisiblePending = function () {
+            var visibleEntries = $scope.pendingPublishVisibleEntries();
+            if (visibleEntries.length === 0) {
+                return;
+            }
+
+            visibleEntries.forEach(function (entry) {
+                $scope.publishReview.selected[entry.path] = true;
+            });
+            publishPendingEntries(visibleEntries).catch($scope.emitHTTPError);
         };
 
         $scope.revertOverride = function () {

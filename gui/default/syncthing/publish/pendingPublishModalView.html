@@ -1,0 +1,166 @@
+<modal id="publishReview" status="info" icon="fas fa-upload" heading="待发布差异" large="yes" closeable="yes">
+  <div class="modal-body">
+    <div class="row">
+      <div class="col-sm-4">
+        <label>查看范围</label>
+        <select class="form-control" ng-model="publishReview.view" ng-change="refreshPendingPublish(1, publishReview.perpage)">
+          <option value="all">显示全部待发布项</option>
+          <option value="added">仅看待发布新增</option>
+          <option value="modified">仅看待发布修改</option>
+          <option value="delete">仅看待发布删除</option>
+        </select>
+      </div>
+      <div class="col-sm-8">
+        <label>路径前缀</label>
+        <div class="input-group">
+          <input class="form-control" ng-model="publishReview.prefix" ng-keypress="$event.which === 13 && refreshPendingPublish(1, publishReview.perpage)" placeholder="目录/子目录">
+          <span class="input-group-btn">
+            <button type="button" class="btn btn-default" ng-click="refreshPendingPublish(1, publishReview.perpage)">
+              <span class="fas fa-filter"></span>&nbsp;<span>应用筛选</span>
+            </button>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <p class="help-block">
+      <span>这里展示的是当前设备文件夹“{{publishReview.folderLabel}}”里已经扫描到、但还没有对外发布的本地变化。</span>
+      <span>发布之后，远端设备才能看到这些差异；远端是否自动接收，还要看远端自己的文件夹类型和接收模式。</span>
+      <span class="text-muted">&nbsp;这个列表以本地索引为准，不需要等待远端文件夹先刷新；弹窗打开后会自动刷新，默认约每 3 秒刷新一次。</span>
+    </p>
+
+    <div class="panel panel-default" ng-if="publishReviewDevices().length > 0">
+      <div class="panel-heading"><strong>共享设备已知接收状态</strong></div>
+      <div class="panel-body">
+        <p class="help-block">
+          这里是发送端视角的辅助反馈：显示共享设备当前连接情况、远端文件夹状态和已知完成度。它能帮助判断“远端大概是否已经看到并开始处理这批发布”，但不等同于远端已真正落盘完成。
+        </p>
+        <table class="table table-condensed table-auto" style="margin-bottom: 0;">
+          <thead>
+            <tr>
+              <th>设备</th>
+              <th>连接</th>
+              <th>远端文件夹状态</th>
+              <th>已知完成度</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr ng-repeat="device in publishReviewDevices()">
+              <td>{{deviceName(device)}}</td>
+              <td>
+                <span ng-if="connections[device.deviceID] && connections[device.deviceID].connected" class="text-success">已连接</span>
+                <span ng-if="!connections[device.deviceID] || !connections[device.deviceID].connected" class="text-muted">离线</span>
+              </td>
+              <td>{{publishReviewRemoteStateLabel(device.deviceID)}}</td>
+              <td>{{publishReviewDeviceCompletion(device.deviceID)}}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="alert alert-info" ng-if="publishReview.entries.length > 0">
+      <div><strong>理解方式：</strong>左侧“当前待发布版本”是这台设备磁盘上的最新状态，右侧“当前对外可见版本”是其他设备现在能看到的版本。</div>
+      <div><strong>使用场景：</strong>这适合“先在发送端挑选，再决定哪些变化要发出去”的流程，比如手机挑选文件后再备份到电脑。</div>
+      <div><strong>发布说明：</strong>点击“发布”不会直接强制远端立刻落盘，它是先把这些变化公开到同步索引中，再由远端按自己的同步策略接收。</div>
+    </div>
+
+    <div class="clearfix">
+      <div class="pull-left">
+        <button type="button" class="btn btn-default btn-sm" ng-click="selectVisiblePendingPublishEntries()" ng-disabled="pendingPublishVisibleEntries().length === 0">
+          <span class="fas fa-check-square"></span>&nbsp;<span>选中当前页可发布条目</span>
+        </button>
+      </div>
+      <div class="pull-right">
+        <button type="button" class="btn btn-default btn-sm" ng-click="clearPendingPublishSelection()" ng-disabled="pendingPublishSelectionCount() === 0">
+          <span class="fas fa-eraser"></span>&nbsp;<span>清空选择</span>
+        </button>
+        <button type="button" class="btn btn-default btn-sm" ng-click="refreshPendingPublishResults()">
+          <span class="fas fa-refresh"></span>&nbsp;<span>刷新列表</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="clearfix" style="margin-top: 8px;">
+      <div class="pull-left text-muted">
+        共 {{publishReview.total | localeNumber}} 项
+      </div>
+      <div class="pull-right text-muted">
+        当前页可发布 {{pendingPublishVisibleEntries().length | localeNumber}} 项，已选中 {{pendingPublishSelectionCount() | localeNumber}} 项
+      </div>
+    </div>
+
+    <div class="panel panel-default" ng-if="publishReview.publishOperation">
+      <div class="panel-heading"><strong>本次发布</strong></div>
+      <div class="panel-body">
+        <div class="text-info" ng-if="publishReview.publishOperation.state === 'submitting' || publishReview.publishOperation.state === 'refreshing'">{{publishReview.publishOperation.message}}</div>
+        <div class="text-success" ng-if="publishReview.publishOperation.state === 'completed'">{{publishReview.publishOperation.message}}</div>
+        <div class="text-danger" ng-if="publishReview.publishOperation.state === 'error'">{{publishReview.publishOperation.message}}</div>
+        <div class="small text-muted" ng-if="publishReview.publishOperation.paths && publishReview.publishOperation.paths.length > 0">
+          本次处理 {{publishReview.publishOperation.paths.length}} 个路径。
+        </div>
+      </div>
+    </div>
+
+    <table class="table table-striped table-condensed table-auto">
+      <thead>
+        <tr>
+          <th class="col-sm-1"></th>
+          <th class="col-sm-3">路径</th>
+          <th class="col-sm-2">动作</th>
+          <th class="col-sm-3">当前待发布版本</th>
+          <th class="col-sm-3">当前对外可见版本</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr dir-paginate="entry in publishReview.entries | itemsPerPage: publishReview.perpage" current-page="publishReview.page" total-items="publishReview.total" pagination-id="publishReview" ng-class="pendingPublishEntryRowClass(entry)">
+          <td>
+            <input type="checkbox" ng-model="publishReview.selected[entry.path]" ng-disabled="!entry.canPublish">
+          </td>
+          <td class="word-break-all">{{entry.path}}</td>
+          <td><span ng-class="pendingPublishActionClass(entry)">{{pendingPublishActionLabel(entry)}}</span></td>
+          <td class="small-data">
+            <div ng-if="entry.local">
+              <div>
+                <span ng-if="entry.local.type != 'directory'">{{entry.local.size | binary}}B</span>
+                <span ng-if="entry.local.type == 'directory'">目录</span>
+              </div>
+              <div>{{entry.local.modified | date:'yyyy-MM-dd HH:mm:ss'}}</div>
+            </div>
+            <div ng-if="!entry.local" class="text-muted">不存在</div>
+          </td>
+          <td class="small-data">
+            <div ng-if="entry.global">
+              <div>
+                <span ng-if="entry.global.type != 'directory'">{{entry.global.size | binary}}B</span>
+                <span ng-if="entry.global.type == 'directory'">目录</span>
+              </div>
+              <div>{{entry.global.modified | date:'yyyy-MM-dd HH:mm:ss'}}</div>
+            </div>
+            <div ng-if="!entry.global" class="text-muted">尚未对外可见</div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <dir-pagination-controls on-page-change="refreshPendingPublish(newPageNumber, publishReview.perpage)" pagination-id="publishReview"></dir-pagination-controls>
+    <ul class="pagination pull-right">
+      <li ng-repeat="option in [10, 25, 50, 100]" ng-class="{ active: publishReview.perpage == option }">
+        <a href="" ng-click="refreshPendingPublish(publishReview.page, option)">{{option}}</a>
+      </li>
+    </ul>
+    <div class="clearfix"></div>
+  </div>
+
+  <div class="modal-footer">
+    <button type="button" class="btn btn-primary btn-sm" ng-click="publishAllVisiblePending()" ng-disabled="pendingPublishVisibleEntries().length === 0 || !publishReview.folderCanPublish || (publishReview.publishOperation && (publishReview.publishOperation.state === 'submitting' || publishReview.publishOperation.state === 'refreshing'))">
+      <span class="fas fa-layer-group"></span>&nbsp;<span>发布当前页全部可发布条目</span>
+    </button>
+    <button type="button" class="btn btn-primary btn-sm" ng-click="publishPendingSelected()" ng-disabled="pendingPublishSelectionCount() === 0 || !publishReview.folderCanPublish || (publishReview.publishOperation && (publishReview.publishOperation.state === 'submitting' || publishReview.publishOperation.state === 'refreshing'))">
+      <span class="fas fa-upload"></span>&nbsp;<span>发布已选条目</span>
+    </button>
+    <button type="button" class="btn btn-default btn-sm" data-dismiss="modal">
+      <span class="fas fa-times"></span>&nbsp;<span>关闭</span>
+    </button>
+  </div>
+</modal>

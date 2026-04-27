@@ -84,6 +84,7 @@ func openBase(path string, maxConns int, pragmas, schemaScripts, migrationScript
 			"FlagLocalGlobal":        protocol.FlagLocalGlobal,
 			"FlagLocalNeeded":        protocol.FlagLocalNeeded,
 			"FlagLocalRemoteInvalid": protocol.FlagLocalRemoteInvalid,
+			"FlagLocalManualPublish": protocol.FlagLocalManualPublish,
 			"LocalInvalidFlags":      protocol.LocalInvalidFlags,
 			"SyncthingVersion":       build.LongVersion,
 		},

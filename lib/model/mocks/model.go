@@ -4093,4 +4093,23 @@ func (fake *Model) recordInvocation(key string, args []interface{}) {
 	fake.invocations[key] = append(fake.invocations[key], args)
 }
 
+func (fake *Model) ManualPublishPendingSize(arg1 string) (db.Counts, error) {
+	fake.recordInvocation("ManualPublishPendingSize", []interface{}{arg1})
+	return db.Counts{}, nil
+}
+
+func (fake *Model) PendingPublishFolderFiles(arg1 string, arg2 model.PendingPublishOptions) (model.PendingPublishResult, error) {
+	fake.recordInvocation("PendingPublishFolderFiles", []interface{}{arg1, arg2})
+	return model.PendingPublishResult{}, nil
+}
+
+func (fake *Model) PublishFolderSelected(arg1 string, arg2 []string) error {
+	var copied []string
+	if arg2 != nil {
+		copied = append([]string(nil), arg2...)
+	}
+	fake.recordInvocation("PublishFolderSelected", []interface{}{arg1, copied})
+	return nil
+}
+
 var _ model.Model = new(Model)

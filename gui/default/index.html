@@ -488,6 +488,12 @@
                           <a href="" ng-click="showLocalChanged(folder.id, folder.type)">{{model[folder.id].receiveOnlyTotalItems | alwaysNumber | localeNumber}} <span translate>items</span>, ~{{model[folder.id].receiveOnlyChangedBytes | binary}}B</a>
                         </td>
                       </tr>
+                      <tr ng-if="hasManualPublishPending(folder)">
+                        <th><span class="fas fa-fw fa-upload"></span>&nbsp;<span>待发布项目</span></th>
+                        <td class="text-right">
+                          <a href="" ng-click="showPublishReview(folder)">{{model[folder.id].manualPublishPendingTotalItems | alwaysNumber | localeNumber}} 条目, ~{{model[folder.id].manualPublishPendingBytes | binary}}B</a>
+                        </td>
+                      </tr>
                       <tr>
                         <th><span class="fas fa-fw fa-folder"></span>&nbsp;<span translate>Folder Type</span></th>
                         <td class="text-right">
@@ -502,6 +508,13 @@
                         <td class="text-right">
                           <span ng-if="!folder.manualSync">自动接收（当前设备）</span>
                           <span ng-if="folder.manualSync">手动审核接收（当前设备）</span>
+                        </td>
+                      </tr>
+                      <tr ng-if="folderCanPublish(folder)">
+                        <th><span class="fas fa-fw fa-upload"></span>&nbsp;<span>当前设备发布模式</span></th>
+                        <td class="text-right">
+                          <span ng-if="!folder.manualPublish">自动发布（当前设备）</span>
+                          <span ng-if="folder.manualPublish">手动审核发布（当前设备）</span>
                         </td>
                       </tr>
                       <tr ng-if="folder.ignorePerms">
@@ -638,8 +651,11 @@
                     <button type="button" class="btn btn-default btn-sm" ng-click="restoreVersions.show(folder.id)" ng-if="folder.versioning.type && folder.versioning.type != 'external'" ng-disabled="folder.paused">
                       <span class="fas fa-undo"></span>&nbsp;<span translate>Versions</span>
                     </button>
+                    <button type="button" class="btn btn-sm btn-default" ng-click="showPublishReview(folder)" ng-if="folder.manualPublish && folderCanPublish(folder)">
+                      <span class="fas fa-upload"></span>&nbsp;<span>发布审核</span>
+                    </button>
                     <button type="button" class="btn btn-sm btn-default" ng-click="showCompare(folder)" ng-if="compareDevices(folder).length > 0">
-                      <span class="fas fa-exchange-alt"></span>&nbsp;<span>文件对比</span>
+                      <span class="fas fa-exchange-alt"></span>&nbsp;<span>{{showCompareButtonLabel(folder)}}</span>
                     </button>
                     <button type="button" class="btn btn-sm btn-default" ng-click="rescanFolder(folder.id)" ng-disabled="['idle', 'stopped', 'unshared', 'outofsync', 'faileditems', 'localadditions'].indexOf(folderStatus(folder)) < 0">
                       <span class="fas fa-refresh"></span>&nbsp;<span translate>Rescan</span>
@@ -1033,6 +1049,7 @@
   <ng-include src="'syncthing/transfer/failedFilesModalView.html'"></ng-include>
   <ng-include src="'syncthing/transfer/remoteNeededFilesModalView.html'"></ng-include>
   <ng-include src="'syncthing/transfer/localChangedFilesModalView.html'"></ng-include>
+  <ng-include src="'syncthing/publish/pendingPublishModalView.html'"></ng-include>
   <ng-include src="'syncthing/compare/compareFilesModalView.html'"></ng-include>
   <ng-include src="'syncthing/core/upgradeModalView.html'"></ng-include>
   <ng-include src="'syncthing/core/majorUpgradeModalView.html'"></ng-include>
