@@ -272,6 +272,23 @@ function remoteStateLabel(value?: string): string {
   }
 }
 
+function fileTypeLabel(value?: string): string {
+  switch (value) {
+    case "FILE_INFO_TYPE_FILE":
+      return "文件";
+    case "FILE_INFO_TYPE_DIRECTORY":
+      return "目录";
+    case "FILE_INFO_TYPE_SYMLINK":
+      return "符号链接";
+    case "FILE_INFO_TYPE_SYMLINK_FILE":
+      return "文件链接";
+    case "FILE_INFO_TYPE_SYMLINK_DIRECTORY":
+      return "目录链接";
+    default:
+      return value || "-";
+  }
+}
+
 function statusTone(status: string): string {
   switch (status) {
     case "same":
@@ -287,6 +304,42 @@ function statusTone(status: string): string {
     default:
       return "info";
   }
+}
+
+function compareSideTone(entry: CompareEntry, side: "local" | "remote"): "success" | "warning" | "danger" | "muted" | "info" {
+  if (entry.renameCandidate) {
+    return "info";
+  }
+  switch (entry.status) {
+    case "only-remote":
+      return side === "remote" ? "success" : "muted";
+    case "only-local":
+      return side === "local" ? "success" : "muted";
+    case "deleted-remote":
+      return side === "remote" ? "danger" : "warning";
+    case "deleted-local":
+      return side === "local" ? "danger" : "warning";
+    case "modified":
+    case "type-changed":
+      return "warning";
+    case "conflict":
+      return "danger";
+    case "same":
+      return "success";
+    default:
+      return "info";
+  }
+}
+
+function completionPercent(value?: CompletionStatus): number {
+  if (!value) {
+    return 0;
+  }
+  const percent = Number(value.completion ?? 0);
+  if (Number.isNaN(percent)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, percent));
 }
 
 function connectionBadgeLabel(connected: boolean, remoteState?: string): string {
@@ -386,6 +439,84 @@ function ResizableTable(props: {
         </colgroup>
         {props.children}
       </table>
+    </div>
+  );
+}
+
+function renderResizableHeaders(columns: ColumnDef[], onColumnsChange: (columns: ColumnDef[]) => void) {
+  return columns.map((col) => (
+    <th key={col.key}>
+      {col.label}
+      {col.key !== "checkbox" && (
+        <div
+          className="resize-handle"
+          onMouseDown={(e) => {
+            const colIndex = columns.findIndex((c) => c.key === col.key);
+            if (colIndex < 0) {
+              return;
+            }
+            const startX = e.clientX;
+            const startWidth = col.width;
+            const handleMouseMove = (moveEvent: MouseEvent) => {
+              const delta = moveEvent.clientX - startX;
+              const newWidth = Math.max(col.minWidth ?? 60, startWidth + delta);
+              const newColumns = [...columns];
+              newColumns[colIndex] = { ...newColumns[colIndex], width: newWidth };
+              onColumnsChange(newColumns);
+            };
+            const handleMouseUp = () => {
+              document.removeEventListener("mousemove", handleMouseMove);
+              document.removeEventListener("mouseup", handleMouseUp);
+              document.body.style.cursor = "";
+              document.body.style.userSelect = "";
+            };
+            document.addEventListener("mousemove", handleMouseMove);
+            document.addEventListener("mouseup", handleMouseUp);
+            document.body.style.cursor = "col-resize";
+            document.body.style.userSelect = "none";
+          }}
+        />
+      )}
+    </th>
+  ));
+}
+
+function FileVersionCell(props: {
+  file?: CompareEntry["local"] | CompareEntry["remote"] | PendingPublishEntry["local"] | PendingPublishEntry["global"];
+  missingLabel: string;
+  tone?: "success" | "warning" | "danger" | "muted" | "info";
+}) {
+  if (!props.file) {
+    return (
+      <div className={`compare-side compare-side-missing${props.tone ? ` tone-${props.tone}` : ""}`}>
+        <div className="compare-side-empty">{props.missingLabel}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`compare-side${props.tone ? ` tone-${props.tone}` : ""}`}>
+      <div className="compare-side-primary">
+        <span>{formatBinary(props.file.size)}</span>
+        <span>{fileTypeLabel(props.file.type)}</span>
+      </div>
+      <div className="compare-side-secondary">
+        <span>{formatDate(props.file.modified)}</span>
+        <span>{props.file.deleted ? "路径已删除" : "存在"}</span>
+      </div>
+    </div>
+  );
+}
+
+function ProgressBar(props: { percent: number; tone?: "success" | "warning" | "danger" | "muted" | "info"; label?: string }) {
+  const percent = Math.max(0, Math.min(100, props.percent));
+  return (
+    <div className="progress-block">
+      {props.label && <div className="progress-label">{props.label}</div>}
+      <div className="progress-track">
+        <div className={`progress-fill${props.tone ? ` tone-${props.tone}` : ""}`} style={{ width: `${percent}%` }} />
+      </div>
+      <div className="progress-value">{percent.toFixed(0)}%</div>
     </div>
   );
 }
@@ -1780,11 +1911,9 @@ function ReceiveReviewPanel(props: {
   const selectedCount = entries.filter((entry) => props.compareSelection[entry.path] && entry.canPrioritize).length;
   const [columns, setColumns] = useState<ColumnDef[]>([
     { key: "checkbox", label: "", width: 40, minWidth: 40 },
-    { key: "status", label: "状态", width: 100, minWidth: 80 },
-    { key: "path", label: "文件路径", width: 300, minWidth: 150 },
-    { key: "size", label: "大小", width: 100, minWidth: 80 },
-    { key: "modified", label: "修改时间", width: 160, minWidth: 120 },
-    { key: "remote", label: "目标设备", width: 200, minWidth: 120 },
+    { key: "summary", label: "差异 / 路径", width: 360, minWidth: 220 },
+    { key: "local", label: "当前设备", width: 290, minWidth: 180 },
+    { key: "remote", label: "目标设备", width: 290, minWidth: 180 },
   ]);
   if (props.devices.length === 0) {
     return (
@@ -1816,9 +1945,8 @@ function ReceiveReviewPanel(props: {
         </div>
 
         <div className="review-stats">
-          <span className={`badge tone-${props.compare?.remoteConnected ? "success" : "warning"}`}>
-            {props.compare?.remoteConnected ? "已连接" : "离线"}
-          </span>
+          <span className={`badge tone-${props.compare?.remoteConnected ? "success" : "warning"}`}>{props.compare?.remoteConnected ? "已连接" : "离线"}</span>
+          <span>目标设备：{deviceName(props.selectedDevice ?? undefined)}</span>
           <span>远端状态：{remoteStateLabel(props.remoteCompletion?.remoteState)}</span>
           <span>共 {props.compare?.total ?? 0} 项</span>
           <span>可操作 {entries.filter((entry) => entry.canPrioritize).length} 项</span>
@@ -1830,42 +1958,7 @@ function ReceiveReviewPanel(props: {
 
         <ResizableTable columns={columns} onColumnsChange={setColumns}>
           <thead>
-            <tr>
-              {columns.map((col) => (
-                <th key={col.key}>
-                  {col.label}
-                  {col.key !== "checkbox" && (
-                    <div
-                      className="resize-handle"
-                      onMouseDown={(e) => {
-                        const colIndex = columns.findIndex((c) => c.key === col.key);
-                        if (colIndex >= 0) {
-                          const startX = e.clientX;
-                          const startWidth = col.width;
-                          const handleMouseMove = (moveEvent: MouseEvent) => {
-                            const delta = moveEvent.clientX - startX;
-                            const newWidth = Math.max(col.minWidth ?? 60, startWidth + delta);
-                            const newColumns = [...columns];
-                            newColumns[colIndex] = { ...newColumns[colIndex], width: newWidth };
-                            setColumns(newColumns);
-                          };
-                          const handleMouseUp = () => {
-                            document.removeEventListener("mousemove", handleMouseMove);
-                            document.removeEventListener("mouseup", handleMouseUp);
-                            document.body.style.cursor = "";
-                            document.body.style.userSelect = "";
-                          };
-                          document.addEventListener("mousemove", handleMouseMove);
-                          document.addEventListener("mouseup", handleMouseUp);
-                          document.body.style.cursor = "col-resize";
-                          document.body.style.userSelect = "none";
-                        }
-                      }}
-                    />
-                  )}
-                </th>
-              ))}
-            </tr>
+            <tr>{renderResizableHeaders(columns, setColumns)}</tr>
           </thead>
           <tbody>
             {entries.map((entry) => {
@@ -1890,37 +1983,33 @@ function ReceiveReviewPanel(props: {
                     />
                   </td>
                   <td>
-                    <div className="compare-status-cell">
+                    <div className="compare-status-cell compare-status-stack">
                       <span className={`badge tone-${statusTone(entry.status)}`}>
                         {compareStatusLabel(entry)}
                       </span>
+                      <div className="compare-path compare-main-path">{entry.path}</div>
+                      {entry.renameCandidate && (
+                        <div className="helper-line">
+                          {compareRenameRole(entry) === "new"
+                            ? `新路径；旧路径：${entry.renameCandidate}`
+                            : `旧路径；新路径：${entry.renameCandidate}`}
+                        </div>
+                      )}
                     </div>
                   </td>
                   <td>
-                    <div className="compare-path">{entry.path}</div>
-                    {entry.renameCandidate && (
-                      <div className="helper-line">
-                        {compareRenameRole(entry) === "new"
-                          ? `新路径；旧路径：${entry.renameCandidate}`
-                          : `旧路径；新路径：${entry.renameCandidate}`}
-                      </div>
-                    )}
+                    <FileVersionCell
+                      file={entry.local}
+                      missingLabel="不存在"
+                      tone={compareSideTone(entry, "local")}
+                    />
                   </td>
                   <td>
-                    <div className="compare-file-info">
-                      <span>{entry.local ? formatBinary(entry.local.size) : "-"}</span>
-                    </div>
-                  </td>
-                  <td>
-                    <div className="compare-file-info">
-                      <span>{entry.local ? formatDate(entry.local.modified) : "-"}</span>
-                    </div>
-                  </td>
-                  <td>
-                    <div className="compare-file-info">
-                      <span className="file-name">{deviceName(props.selectedDevice ?? undefined)}</span>
-                      <span className="file-meta">{entry.remote ? formatBinary(entry.remote.size) : "不存在"}</span>
-                    </div>
+                    <FileVersionCell
+                      file={entry.remote}
+                      missingLabel="不存在"
+                      tone={compareSideTone(entry, "remote")}
+                    />
                   </td>
                 </tr>
               );
@@ -1934,33 +2023,39 @@ function ReceiveReviewPanel(props: {
       </div>
 
       <div className="review-modal-sidebar">
-        <div>
+        <div className="review-sidebar-card">
           <div className="section-title">目标设备</div>
-          <select
-            value={props.selectedDeviceId}
-            onChange={(event) => props.onSelectDevice(event.target.value)}
-            style={{ width: "100%", marginTop: 6 }}
-          >
+          <select value={props.selectedDeviceId} onChange={(event) => props.onSelectDevice(event.target.value)} style={{ width: "100%", marginTop: 6 }}>
             {props.devices.map((device) => (
               <option key={device.deviceID} value={device.deviceID}>
                 {deviceName(device)}
               </option>
             ))}
           </select>
+          <div className="review-target-status">
+            <span className={`badge tone-${props.compare?.remoteConnected ? "success" : "warning"}`}>
+              {props.compare?.remoteConnected ? "已连接" : "离线"}
+            </span>
+            <span className={`badge tone-${props.remoteCompletion?.remoteState === "syncing" ? "warning" : "muted"}`}>
+              {remoteStateLabel(props.remoteCompletion?.remoteState)}
+            </span>
+            <span className="helper-line">完成度 {props.remoteCompletion?.completion ?? 0}% · 待同步 {props.remoteCompletion?.needItems ?? 0} 项</span>
+            <ProgressBar
+              percent={completionPercent(props.remoteCompletion)}
+              tone={props.compare?.remoteConnected ? "success" : "muted"}
+              label="接收进度"
+            />
+          </div>
         </div>
 
-        <div>
+        <div className="review-sidebar-card">
           <div className="section-title">同步模式</div>
-          <span className="badge tone-info" style={{ marginTop: 6 }}>
-            {props.compare?.manualSync ? "手动审核接收" : "自动接收"}
-          </span>
+          <span className="badge tone-info" style={{ marginTop: 6 }}>{props.compare?.manualSync ? "手动审核接收" : "自动接收"}</span>
         </div>
 
-        <div>
+        <div className="review-sidebar-card">
           <div className="section-title">索引状态</div>
-          <span className="badge tone-muted" style={{ marginTop: 6 }}>
-            {props.compare?.remoteConnected ? "实时" : "最近已知"}
-          </span>
+          <span className="badge tone-muted" style={{ marginTop: 6 }}>{props.compare?.remoteConnected ? "实时" : "最近已知"}</span>
         </div>
 
         <div className="review-actions">
@@ -2013,11 +2108,9 @@ function PublishReviewPanel(props: {
   const selectedCount = entries.filter((entry) => props.publishSelection[entry.path] && entry.canPublish).length;
   const [columns, setColumns] = useState<ColumnDef[]>([
     { key: "checkbox", label: "", width: 40, minWidth: 40 },
-    { key: "status", label: "状态", width: 100, minWidth: 80 },
-    { key: "path", label: "文件路径", width: 300, minWidth: 150 },
-    { key: "size", label: "大小", width: 100, minWidth: 80 },
-    { key: "modified", label: "修改时间", width: 160, minWidth: 120 },
-    { key: "global", label: "对外可见版本", width: 200, minWidth: 120 },
+    { key: "summary", label: "发布变化 / 路径", width: 360, minWidth: 220 },
+    { key: "local", label: "当前待发布版本", width: 290, minWidth: 180 },
+    { key: "global", label: "当前对外可见版本", width: 290, minWidth: 180 },
   ]);
   return (
     <div className="review-modal-layout">
@@ -2052,42 +2145,7 @@ function PublishReviewPanel(props: {
 
         <ResizableTable columns={columns} onColumnsChange={setColumns}>
           <thead>
-            <tr>
-              {columns.map((col) => (
-                <th key={col.key}>
-                  {col.label}
-                  {col.key !== "checkbox" && (
-                    <div
-                      className="resize-handle"
-                      onMouseDown={(e) => {
-                        const colIndex = columns.findIndex((c) => c.key === col.key);
-                        if (colIndex >= 0) {
-                          const startX = e.clientX;
-                          const startWidth = col.width;
-                          const handleMouseMove = (moveEvent: MouseEvent) => {
-                            const delta = moveEvent.clientX - startX;
-                            const newWidth = Math.max(col.minWidth ?? 60, startWidth + delta);
-                            const newColumns = [...columns];
-                            newColumns[colIndex] = { ...newColumns[colIndex], width: newWidth };
-                            setColumns(newColumns);
-                          };
-                          const handleMouseUp = () => {
-                            document.removeEventListener("mousemove", handleMouseMove);
-                            document.removeEventListener("mouseup", handleMouseUp);
-                            document.body.style.cursor = "";
-                            document.body.style.userSelect = "";
-                          };
-                          document.addEventListener("mousemove", handleMouseMove);
-                          document.addEventListener("mouseup", handleMouseUp);
-                          document.body.style.cursor = "col-resize";
-                          document.body.style.userSelect = "none";
-                        }
-                      }}
-                    />
-                  )}
-                </th>
-              ))}
-            </tr>
+            <tr>{renderResizableHeaders(columns, setColumns)}</tr>
           </thead>
           <tbody>
             {entries.map((entry) => {
@@ -2113,35 +2171,23 @@ function PublishReviewPanel(props: {
                     />
                   </td>
                   <td>
-                    <div className="compare-status-cell">
+                    <div className="compare-status-cell compare-status-stack">
                       <span className={`badge tone-${tone}`}>{pendingPublishLabel(entry)}</span>
+                      <div className="compare-path compare-main-path">{entry.path}</div>
+                      {entry.renameCandidate && (
+                        <div className="helper-line">
+                          {pendingRenameRole(entry) === "new"
+                            ? `新路径；旧路径：${entry.renameCandidate}`
+                            : `旧路径；新路径：${entry.renameCandidate}`}
+                        </div>
+                      )}
                     </div>
                   </td>
                   <td>
-                    <div className="compare-path">{entry.path}</div>
-                    {entry.renameCandidate && (
-                      <div className="helper-line">
-                        {pendingRenameRole(entry) === "new"
-                          ? `新路径；旧路径：${entry.renameCandidate}`
-                          : `旧路径；新路径：${entry.renameCandidate}`}
-                      </div>
-                    )}
+                    <FileVersionCell file={entry.local} missingLabel="不存在" tone={tone} />
                   </td>
                   <td>
-                    <div className="compare-file-info">
-                      <span>{entry.local ? formatBinary(entry.local.size) : "-"}</span>
-                    </div>
-                  </td>
-                  <td>
-                    <div className="compare-file-info">
-                      <span>{entry.local ? formatDate(entry.local.modified) : "-"}</span>
-                    </div>
-                  </td>
-                  <td>
-                    <div className="compare-file-info">
-                      <span className="file-name">当前对外可见版本</span>
-                      <span className="file-meta">{entry.global ? formatBinary(entry.global.size) : "尚未对外可见"}</span>
-                    </div>
+                    <FileVersionCell file={entry.global} missingLabel="尚未对外可见" tone={tone} />
                   </td>
                 </tr>
               );
@@ -2170,6 +2216,7 @@ function PublishReviewPanel(props: {
                   <div className="device-meta">
                     状态：{remoteStateLabel(completion?.remoteState)} · {completion?.completion ?? 0}%
                   </div>
+                  <ProgressBar percent={completionPercent(completion)} tone={connected ? "success" : "muted"} />
                 </div>
               );
             })}
