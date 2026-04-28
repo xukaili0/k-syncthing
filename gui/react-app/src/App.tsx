@@ -1,4 +1,4 @@
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import {
   CompareEntry,
   CompareResult,
@@ -331,6 +331,31 @@ function compareSideTone(entry: CompareEntry, side: "local" | "remote"): "succes
   }
 }
 
+function compareKind(entry: CompareEntry): string {
+  if (entry.renameCandidate) {
+    return compareRenameRole(entry) === "old" ? "rename-old" : compareRenameRole(entry) === "new" ? "rename-new" : "rename";
+  }
+  switch (entry.status) {
+    case "only-remote":
+      return "remote-add";
+    case "only-local":
+      return "local-add";
+    case "deleted-remote":
+      return "remote-delete";
+    case "deleted-local":
+      return "local-delete";
+    case "modified":
+    case "type-changed":
+      return "modified";
+    case "conflict":
+      return "conflict";
+    case "same":
+      return "same";
+    default:
+      return "neutral";
+  }
+}
+
 function completionPercent(value?: CompletionStatus): number {
   if (!value) {
     return 0;
@@ -386,52 +411,44 @@ type ColumnDef = {
   minWidth?: number;
 };
 
+function beginColumnResize(
+  clientX: number,
+  columnIndex: number,
+  columns: ColumnDef[],
+  onColumnsChange: (columns: ColumnDef[]) => void,
+) {
+  const column = columns[columnIndex];
+  if (!column) {
+    return;
+  }
+  const startWidth = column.width;
+  const handlePointerMove = (moveEvent: PointerEvent) => {
+    const delta = moveEvent.clientX - clientX;
+    const newWidth = Math.max(column.minWidth ?? 60, startWidth + delta);
+    const newColumns = [...columns];
+    newColumns[columnIndex] = { ...newColumns[columnIndex], width: newWidth };
+    onColumnsChange(newColumns);
+  };
+  const handlePointerUp = () => {
+    document.removeEventListener("pointermove", handlePointerMove);
+    document.removeEventListener("pointerup", handlePointerUp);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  };
+  document.addEventListener("pointermove", handlePointerMove);
+  document.addEventListener("pointerup", handlePointerUp);
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+}
+
 function ResizableTable(props: {
   columns: ColumnDef[];
   onColumnsChange: (columns: ColumnDef[]) => void;
   children: ReactNode;
 }) {
-  const tableRef = useRef<HTMLTableElement>(null);
-  const resizingRef = useRef<{ columnIndex: number; startX: number; startWidth: number } | null>(null);
-
-  const handleMouseDown = useCallback(
-    (columnIndex: number, event: React.MouseEvent) => {
-      event.preventDefault();
-      const column = props.columns[columnIndex];
-      resizingRef.current = {
-        columnIndex,
-        startX: event.clientX,
-        startWidth: column.width,
-      };
-
-      const handleMouseMove = (moveEvent: MouseEvent) => {
-        if (!resizingRef.current) return;
-        const delta = moveEvent.clientX - resizingRef.current.startX;
-        const newWidth = Math.max(column.minWidth ?? 60, resizingRef.current.startWidth + delta);
-        const newColumns = [...props.columns];
-        newColumns[columnIndex] = { ...newColumns[columnIndex], width: newWidth };
-        props.onColumnsChange(newColumns);
-      };
-
-      const handleMouseUp = () => {
-        resizingRef.current = null;
-        document.removeEventListener("mousemove", handleMouseMove);
-        document.removeEventListener("mouseup", handleMouseUp);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-      };
-
-      document.addEventListener("mousemove", handleMouseMove);
-      document.addEventListener("mouseup", handleMouseUp);
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
-    },
-    [props.columns, props.onColumnsChange]
-  );
-
   return (
     <div className="compare-table-wrapper">
-      <table ref={tableRef} className="compare-table">
+      <table className="compare-table">
         <colgroup>
           {props.columns.map((col) => (
             <col key={col.key} style={{ width: col.width }} />
@@ -450,30 +467,13 @@ function renderResizableHeaders(columns: ColumnDef[], onColumnsChange: (columns:
       {col.key !== "checkbox" && (
         <div
           className="resize-handle"
-          onMouseDown={(e) => {
+          onPointerDown={(e) => {
+            e.preventDefault();
             const colIndex = columns.findIndex((c) => c.key === col.key);
             if (colIndex < 0) {
               return;
             }
-            const startX = e.clientX;
-            const startWidth = col.width;
-            const handleMouseMove = (moveEvent: MouseEvent) => {
-              const delta = moveEvent.clientX - startX;
-              const newWidth = Math.max(col.minWidth ?? 60, startWidth + delta);
-              const newColumns = [...columns];
-              newColumns[colIndex] = { ...newColumns[colIndex], width: newWidth };
-              onColumnsChange(newColumns);
-            };
-            const handleMouseUp = () => {
-              document.removeEventListener("mousemove", handleMouseMove);
-              document.removeEventListener("mouseup", handleMouseUp);
-              document.body.style.cursor = "";
-              document.body.style.userSelect = "";
-            };
-            document.addEventListener("mousemove", handleMouseMove);
-            document.addEventListener("mouseup", handleMouseUp);
-            document.body.style.cursor = "col-resize";
-            document.body.style.userSelect = "none";
+            beginColumnResize(e.clientX, colIndex, columns, onColumnsChange);
           }}
         />
       )}
@@ -1669,27 +1669,8 @@ function OverviewPanel(props: {
     { key: "actions", label: "操作", width: 130, minWidth: 100 },
   ]);
 
-  const handleOvResize = (colIndex: number, e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = ovColumns[colIndex].width;
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const delta = moveEvent.clientX - startX;
-      const newWidth = Math.max(ovColumns[colIndex].minWidth ?? 40, startWidth + delta);
-      const newColumns = [...ovColumns];
-      newColumns[colIndex] = { ...newColumns[colIndex], width: newWidth };
-      setOvColumns(newColumns);
-    };
-    const handleMouseUp = () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
+  const handleOvResize = (colIndex: number, clientX: number) => {
+    beginColumnResize(clientX, colIndex, ovColumns, setOvColumns);
   };
 
   const gridTemplate = ovColumns.map((col) => `${col.width}px`).join(" ");
@@ -1711,7 +1692,10 @@ function OverviewPanel(props: {
               {col.label}
               <div
                 className="ov-resize-handle"
-                onMouseDown={(e) => handleOvResize(ovColumns.findIndex((c) => c.key === col.key), e)}
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  handleOvResize(ovColumns.findIndex((c) => c.key === col.key), e.clientX);
+                }}
               />
             </div>
           ))}
@@ -1952,6 +1936,7 @@ function ReceiveReviewPanel(props: {
           <span>可操作 {entries.filter((entry) => entry.canPrioritize).length} 项</span>
           <span>已选 {selectedCount} 项</span>
         </div>
+        <div className="review-mobile-hint">手机建议横屏查看；表格可左右滑动，按住列头分隔线可调整列宽。</div>
 
         {props.compareMessage && <div className="inline-message info">{props.compareMessage}</div>}
         {props.compareError && <div className="inline-message danger">{props.compareError}</div>}
@@ -1963,10 +1948,12 @@ function ReceiveReviewPanel(props: {
           <tbody>
             {entries.map((entry) => {
               const selected = Boolean(props.compareSelection[entry.path]);
+              const kind = compareKind(entry);
+              const renameRole = compareRenameRole(entry);
               return (
                 <tr
                   key={entry.path}
-                  className={`tone-${statusTone(entry.status)}${selected ? " selected" : ""}`}
+                  className={`tone-${statusTone(entry.status)} kind-${kind}${selected ? " selected" : ""}`}
                 >
                   <td>
                     <input
@@ -1984,13 +1971,20 @@ function ReceiveReviewPanel(props: {
                   </td>
                   <td>
                     <div className="compare-status-cell compare-status-stack">
-                      <span className={`badge tone-${statusTone(entry.status)}`}>
-                        {compareStatusLabel(entry)}
-                      </span>
+                      <div className="compare-status-badges">
+                        <span className={`badge compare-status-badge tone-${statusTone(entry.status)} kind-${kind}`}>
+                          {compareStatusLabel(entry)}
+                        </span>
+                        {renameRole && (
+                          <span className={`badge compare-role-badge role-${renameRole}`}>
+                            {renameRole === "old" ? "旧路径" : "新路径"}
+                          </span>
+                        )}
+                      </div>
                       <div className="compare-path compare-main-path">{entry.path}</div>
                       {entry.renameCandidate && (
-                        <div className="helper-line">
-                          {compareRenameRole(entry) === "new"
+                        <div className={`helper-line compare-pair-line role-${renameRole || "pair"}`}>
+                          {renameRole === "new"
                             ? `新路径；旧路径：${entry.renameCandidate}`
                             : `旧路径；新路径：${entry.renameCandidate}`}
                         </div>
@@ -2139,6 +2133,7 @@ function PublishReviewPanel(props: {
           <span>可发布 {entries.filter((entry) => entry.canPublish).length} 项</span>
           <span>已选 {selectedCount} 项</span>
         </div>
+        <div className="review-mobile-hint">手机建议横屏查看；表格可左右滑动，按住列头分隔线可调整列宽。</div>
 
         {props.publishMessage && <div className="inline-message info">{props.publishMessage}</div>}
         {props.publishError && <div className="inline-message danger">{props.publishError}</div>}
