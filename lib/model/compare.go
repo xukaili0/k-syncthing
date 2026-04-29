@@ -196,18 +196,33 @@ func buildCompareEntries(localFiles, remoteFiles map[string]protocol.FileInfo, m
 	return entries
 }
 
+func compareEntryHasLiveFile(fi *protocol.FileInfo) bool {
+	return fi != nil && !fi.IsDeleted()
+}
+
+func pruneInertCompareEntries(entries []CompareEntry) []CompareEntry {
+	filtered := make([]CompareEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !compareEntryHasLiveFile(entry.Local) && !compareEntryHasLiveFile(entry.Remote) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
 func compareEntryStatus(localOK, remoteOK bool, local, remote protocol.FileInfo, modTimeWindow time.Duration) string {
 	switch {
 	case !localOK && !remoteOK:
 		return CompareViewSame
 	case !localOK:
 		if remote.IsDeleted() {
-			return "deleted-remote"
+			return "same"
 		}
 		return "only-remote"
 	case !remoteOK:
 		if local.IsDeleted() {
-			return "deleted-local"
+			return "same"
 		}
 		return "only-local"
 	case local.IsDeleted() && remote.IsDeleted():
@@ -333,6 +348,8 @@ func compareEntryGroupRank(entry CompareEntry) int {
 }
 
 func filterCompareEntries(entries []CompareEntry, view string) []CompareEntry {
+	entries = pruneInertCompareEntries(entries)
+
 	if view == "" || view == CompareViewAll {
 		return entries
 	}

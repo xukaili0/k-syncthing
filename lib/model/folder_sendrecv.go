@@ -168,6 +168,7 @@ func newSendReceiveFolder(model *model, ignores *ignore.Matcher, cfg config.Fold
 // the device in sync with the global state.
 func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
 	f.sl.DebugContext(ctx, "Pulling")
+	selected := f.consumeManualSelection()
 
 	scanChan := make(chan string)
 	go f.pullScannerRoutine(ctx, scanChan)
@@ -199,7 +200,7 @@ func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
 		// it to FolderSyncing during the last iteration.
 		f.setState(FolderSyncPreparing)
 
-		changed, err = f.pullerIteration(ctx, scanChan)
+		changed, err = f.pullerIteration(ctx, scanChan, selected)
 		if err != nil {
 			return false, err
 		}
@@ -244,7 +245,7 @@ func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
 // returns the number items that should have been synced (even those that
 // might have failed). One puller iteration handles all files currently
 // flagged as needed in the folder.
-func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<- string) (int, error) {
+func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<- string, selected map[string]struct{}) (int, error) {
 	f.errorsMut.Lock()
 	f.tempPullErrors = make(map[string]string)
 	f.errorsMut.Unlock()
@@ -284,7 +285,7 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 		f.finisherRoutine(ctx, finisherChan, dbUpdateChan, scanChan)
 	})
 
-	fileDeletions, dirDeletions, err := f.processNeeded(ctx, dbUpdateChan, copyChan, scanChan)
+	fileDeletions, dirDeletions, err := f.processNeeded(ctx, dbUpdateChan, copyChan, scanChan, selected)
 
 	// Signal copy and puller routines that we are done with the in data for
 	// this iteration. Wait for them to finish.
@@ -311,11 +312,10 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 	return changed, err
 }
 
-func (f *sendReceiveFolder) processNeeded(ctx context.Context, dbUpdateChan chan<- dbUpdateJob, copyChan chan<- copyBlocksState, scanChan chan<- string) (map[string]protocol.FileInfo, []protocol.FileInfo, error) {
+func (f *sendReceiveFolder) processNeeded(ctx context.Context, dbUpdateChan chan<- dbUpdateJob, copyChan chan<- copyBlocksState, scanChan chan<- string, selected map[string]struct{}) (map[string]protocol.FileInfo, []protocol.FileInfo, error) {
 	var dirDeletions []protocol.FileInfo
 	fileDeletions := map[string]protocol.FileInfo{}
 	buckets := map[string][]protocol.FileInfo{}
-	selected := f.consumeManualSelection()
 
 	// Iterate the list of items that we need and sort them into piles.
 	// Regular files to pull goes into the file queue, everything else

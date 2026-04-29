@@ -257,6 +257,7 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/ignores", s.getDBIgnores)                   // folder
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/need", s.getDBNeed)                         // folder [perpage] [page]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/compare", s.getDBCompare)                   // device folder [perpage] [page] [prefix] [view]
+	restMux.HandlerFunc(http.MethodGet, "/rest/db/bidiff", s.getDBBiDiff)                     // device folder [perpage] [page] [prefix] [view]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/remoteneed", s.getDBRemoteNeed)             // device folder [perpage] [page]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/localchanged", s.getDBLocalChanged)         // folder [perpage] [page]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/pendingpublish", s.getDBPendingPublish)     // folder [perpage] [page] [prefix] [view]
@@ -292,6 +293,7 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/pull", s.postDBPull)                          // folder
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/pullselected", s.postDBPullSelected)          // folder <body>
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/publishselected", s.postDBPublishSelected)    // folder <body>
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/bidiffapply", s.postDBBiDiffApply)            // folder device <body>
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/ignores", s.postDBIgnores)                    // folder
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/override", s.postDBOverride)                  // folder
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/revert", s.postDBRevert)                      // folder
@@ -960,6 +962,46 @@ func (s *service) getDBCompare(w http.ResponseWriter, r *http.Request) {
 		"device":          result.RemoteDeviceID.String(),
 		"view":            result.RequestedView,
 		"prefix":          result.RequestedPrefix,
+	})
+}
+
+func (s *service) getDBBiDiff(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+
+	folder := qs.Get("folder")
+	device := qs.Get("device")
+	deviceID, err := protocol.DeviceIDFromString(device)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	page, perpage := getPagingParams(qs)
+
+	result, err := s.model.BiDiffFolderFiles(folder, deviceID, model.BiDiffOptions{
+		Page:    page,
+		PerPage: perpage,
+		Prefix:  qs.Get("prefix"),
+		View:    qs.Get("view"),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	sendJSON(w, map[string]interface{}{
+		"entries":          toJSONBiDiffEntrySlice(result.Entries),
+		"page":             result.Page,
+		"perpage":          result.PerPage,
+		"total":            result.Total,
+		"rightConnected":   result.RightConnected,
+		"folderCanReceive": result.FolderCanReceive,
+		"folderCanPublish": result.FolderCanPublish,
+		"manualSync":       result.ManualSync,
+		"manualPublish":    result.ManualPublish,
+		"rightDeviceID":    result.RightDeviceID.String(),
+		"view":             result.RequestedView,
+		"prefix":           result.RequestedPrefix,
 	})
 }
 
@@ -1682,6 +1724,35 @@ func (s *service) postDBPull(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, map[string]any{"ok": true})
 }
 
+func (s *service) postDBBiDiffApply(w http.ResponseWriter, r *http.Request) {
+	folder := r.URL.Query().Get("folder")
+	device := r.URL.Query().Get("device")
+	deviceID, err := protocol.DeviceIDFromString(device)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var body struct {
+		Direction string   `json:"direction"`
+		Files     []string `json:"files"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := s.model.ApplyBiDiffSelection(folder, deviceID, body.Direction, body.Files); err != nil {
+		status := http.StatusInternalServerError
+		if isFolderNotFound(err) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	sendJSON(w, map[string]any{"ok": true})
+}
+
 func (s *service) postDBPullSelected(w http.ResponseWriter, r *http.Request) {
 	folder := r.URL.Query().Get("folder")
 
@@ -1907,6 +1978,14 @@ func toJSONCompareEntrySlice(entries []model.CompareEntry) []jsonCompareEntry {
 	return res
 }
 
+func toJSONBiDiffEntrySlice(entries []model.BiDiffEntry) []jsonBiDiffEntry {
+	res := make([]jsonBiDiffEntry, len(entries))
+	for i, entry := range entries {
+		res[i] = jsonBiDiffEntry(entry)
+	}
+	return res
+}
+
 func toJSONPendingPublishEntrySlice(entries []model.PendingPublishEntry) []jsonPendingPublishEntry {
 	res := make([]jsonPendingPublishEntry, len(entries))
 	for i, entry := range entries {
@@ -1919,6 +1998,7 @@ func toJSONPendingPublishEntrySlice(entries []model.PendingPublishEntry) []jsonP
 
 type jsonFileInfo protocol.FileInfo
 type jsonCompareEntry model.CompareEntry
+type jsonBiDiffEntry model.BiDiffEntry
 type jsonPendingPublishEntry model.PendingPublishEntry
 
 func (f jsonFileInfo) MarshalJSON() ([]byte, error) {
@@ -1940,6 +2020,26 @@ func (e jsonCompareEntry) MarshalJSON() ([]byte, error) {
 	}
 	if entry.Remote != nil {
 		out["remote"] = jsonFileInfo(*entry.Remote)
+	}
+	return json.Marshal(out)
+}
+
+func (e jsonBiDiffEntry) MarshalJSON() ([]byte, error) {
+	entry := model.BiDiffEntry(e)
+	out := map[string]interface{}{
+		"path":                entry.Path,
+		"status":              entry.Status,
+		"renameCandidate":     entry.RenameCandidate,
+		"canApplyLeftToRight": entry.CanApplyLeftToRight,
+		"canApplyRightToLeft": entry.CanApplyRightToLeft,
+		"leftToRightReason":   entry.LeftToRightReason,
+		"rightToLeftReason":   entry.RightToLeftReason,
+	}
+	if entry.Left != nil {
+		out["left"] = jsonFileInfo(*entry.Left)
+	}
+	if entry.Right != nil {
+		out["right"] = jsonFileInfo(*entry.Right)
 	}
 	return json.Marshal(out)
 }

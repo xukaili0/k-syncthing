@@ -1,5 +1,7 @@
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { CSSProperties, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  BiDiffEntry,
+  BiDiffResult,
   CompareEntry,
   CompareResult,
   CompletionStatus,
@@ -19,6 +21,7 @@ import {
   logout,
   putJSON,
   postJSON,
+  triggerFolderScan,
   triggerSystemAction,
 } from "./api";
 
@@ -26,6 +29,10 @@ type ViewMode = "overview" | "receive" | "publish";
 
 const MAIN_REFRESH_KEY = "reactGuiMainRefreshSeconds";
 const PANEL_REFRESH_KEY = "reactGuiPanelRefreshSeconds";
+const BIDIFF_SIDEBAR_WIDTH_KEY = "reactGuiBidiffSidebarWidth";
+const BIDIFF_TIME_MODE_KEY = "reactGuiBidiffTimeMode";
+const BIDIFF_FONT_SCALE_KEY = "reactGuiBidiffFontScale";
+const BIDIFF_DENSITY_KEY = "reactGuiBidiffDensity";
 
 const compareViewOptions = [
   { value: "different", label: "仅看差异" },
@@ -36,6 +43,17 @@ const compareViewOptions = [
   { value: "only-local", label: "仅本地存在" },
   { value: "only-remote", label: "仅远端存在" },
   { value: "rename", label: "疑似移动/重命名" },
+] as const;
+
+const bidiffViewOptions = [
+  { value: "different", label: "仅看待裁决差异" },
+  { value: "all", label: "显示全部有效条目" },
+  { value: "delete", label: "仅看删除 / 缺失" },
+  { value: "modified", label: "仅看内容变化" },
+  { value: "conflict", label: "仅看冲突" },
+  { value: "only-local", label: "仅左侧存在" },
+  { value: "only-remote", label: "仅右侧存在" },
+  { value: "rename", label: "疑似移动 / 重命名" },
 ] as const;
 
 const publishViewOptions = [
@@ -71,6 +89,42 @@ function storeSeconds(key: string, value: number) {
   }
 }
 
+function readStoredPixels(key: string, fallback: number, min: number, max: number): number {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) {
+      return fallback;
+    }
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isNaN(parsed)) {
+      return fallback;
+    }
+    return Math.min(max, Math.max(min, parsed));
+  } catch {
+    return fallback;
+  }
+}
+
+function storePixels(key: string, value: number) {
+  try {
+    window.localStorage.setItem(key, String(value));
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function readStoredChoice<T extends string>(key: string, fallback: T, allowed: readonly T[]): T {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) {
+      return fallback;
+    }
+    return allowed.includes(raw as T) ? (raw as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function formatBinary(bytes: number | undefined): string {
   if (!bytes || bytes <= 0) {
     return "0 B";
@@ -86,13 +140,20 @@ function formatBinary(bytes: number | undefined): string {
   return `${value.toFixed(precision)} ${units[unit]}`;
 }
 
-function formatDate(value?: string): string {
+function formatDate(value?: string, mode: "full" | "compact" = "full"): string {
   if (!value) {
     return "-";
   }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
+  }
+  if (mode === "compact") {
+    const yy = String(date.getFullYear()).slice(-2);
+    const mm = String(date.getMonth() + 1).padStart(2, "0");
+    const dd = String(date.getDate()).padStart(2, "0");
+    const hh = String(date.getHours()).padStart(2, "0");
+    return `${yy}/${mm}/${dd} ${hh}`;
   }
   return date.toLocaleString("zh-CN", {
     year: "numeric",
@@ -356,6 +417,398 @@ function compareKind(entry: CompareEntry): string {
   }
 }
 
+function bidiffStatusLabel(entry: BiDiffEntry): string {
+  if (entry.renameCandidate) {
+    return "疑似移动/重命名";
+  }
+
+  switch (entry.status) {
+    case "same":
+      return "相同";
+    case "only-local":
+      return "仅左侧存在";
+    case "only-remote":
+      return "仅右侧存在";
+    case "deleted-local":
+      return "左侧路径已删除";
+    case "deleted-remote":
+      return "右侧路径已删除";
+    case "modified":
+      return "已修改";
+    case "conflict":
+      return "冲突";
+    case "type-changed":
+      return "类型变化";
+    default:
+      return entry.status;
+  }
+}
+
+function bidiffRenameRole(entry: BiDiffEntry): "old" | "new" | "" {
+  if (!entry.renameCandidate) {
+    return "";
+  }
+  switch (entry.status) {
+    case "deleted-remote":
+    case "only-local":
+      return "new";
+    case "deleted-local":
+    case "only-remote":
+      return "old";
+    default:
+      return "";
+  }
+}
+
+function bidiffKind(entry: BiDiffEntry): string {
+  if (entry.renameCandidate) {
+    return bidiffRenameRole(entry) === "old" ? "rename-old" : bidiffRenameRole(entry) === "new" ? "rename-new" : "rename";
+  }
+  switch (entry.status) {
+    case "only-remote":
+      return "remote-add";
+    case "only-local":
+      return "local-add";
+    case "deleted-remote":
+      return "remote-delete";
+    case "deleted-local":
+      return "local-delete";
+    case "modified":
+    case "type-changed":
+      return "modified";
+    case "conflict":
+      return "conflict";
+    case "same":
+      return "same";
+    default:
+      return "neutral";
+  }
+}
+
+function bidiffSideTone(entry: BiDiffEntry, side: "left" | "right"): "success" | "warning" | "danger" | "muted" | "info" {
+  if (entry.renameCandidate) {
+    if (bidiffRenameRole(entry) === "old") {
+      return side === "left" ? "warning" : "muted";
+    }
+    if (bidiffRenameRole(entry) === "new") {
+      return side === "right" ? "success" : "muted";
+    }
+    return "info";
+  }
+  switch (entry.status) {
+    case "only-remote":
+      return side === "right" ? "success" : "muted";
+    case "only-local":
+      return side === "left" ? "success" : "muted";
+    case "deleted-remote":
+      return side === "right" ? "danger" : "warning";
+    case "deleted-local":
+      return side === "left" ? "danger" : "warning";
+    case "modified":
+    case "type-changed":
+      return "warning";
+    case "conflict":
+      return "danger";
+    case "same":
+      return "success";
+    default:
+      return "info";
+  }
+}
+
+function bidiffHasLiveFile(file?: BiDiffEntry["left"] | BiDiffEntry["right"]): boolean {
+  return Boolean(file && !file.deleted);
+}
+
+function bidiffFilesLookEquivalent(left?: BiDiffEntry["left"], right?: BiDiffEntry["right"]): boolean {
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    left.deleted === right.deleted &&
+    left.type === right.type &&
+    left.size === right.size &&
+    left.modified === right.modified
+  );
+}
+
+function isGuiInertBiDiffEntry(entry: BiDiffEntry): boolean {
+  if (bidiffHasLiveFile(entry.left) && bidiffHasLiveFile(entry.right) && bidiffFilesLookEquivalent(entry.left, entry.right)) {
+    return true;
+  }
+  if (!bidiffHasLiveFile(entry.left) && !bidiffHasLiveFile(entry.right)) {
+    return true;
+  }
+  return false;
+}
+
+function bidiffPresenceSummary(entry: BiDiffEntry): { label: string; className: string } {
+  const leftLive = bidiffHasLiveFile(entry.left);
+  const rightLive = bidiffHasLiveFile(entry.right);
+  if (leftLive && !rightLive) {
+    return { label: "左有 / 右无", className: "presence-left-only" };
+  }
+  if (!leftLive && rightLive) {
+    return { label: "左无 / 右有", className: "presence-right-only" };
+  }
+  if (leftLive && rightLive) {
+    return { label: "左右都有", className: "presence-both" };
+  }
+  return { label: "左右都无", className: "presence-none" };
+}
+
+function bidiffRelationIndicator(entry: BiDiffEntry): { symbol: string; className: string; title: string } {
+  const renameRole = bidiffRenameRole(entry);
+  if (entry.renameCandidate) {
+    if (renameRole === "old") {
+      return { symbol: "↷ 旧", className: "relation-rename-old", title: "疑似移动/重命名组中的旧路径" };
+    }
+    if (renameRole === "new") {
+      return { symbol: "↷ 新", className: "relation-rename-new", title: "疑似移动/重命名组中的新路径" };
+    }
+    return { symbol: "↷", className: "relation-rename", title: "疑似移动/重命名" };
+  }
+
+  const presence = bidiffPresenceSummary(entry);
+  switch (presence.className) {
+    case "presence-left-only":
+      return { symbol: "● | ○", className: "relation-left-only", title: "左侧存在，右侧不存在" };
+    case "presence-right-only":
+      return { symbol: "○ | ●", className: "relation-right-only", title: "左侧不存在，右侧存在" };
+    case "presence-both":
+      return { symbol: "● | ●", className: "relation-both", title: "左右两侧都存在" };
+    default:
+      return { symbol: "○ | ○", className: "relation-none", title: "左右两侧都不存在" };
+  }
+}
+
+function bidiffActionabilityLabel(entry: BiDiffEntry): { label: string; className: string; title: string } {
+  if (entry.canApplyLeftToRight && entry.canApplyRightToLeft) {
+    return { label: "⇄", className: "action-both", title: "可双向裁决" };
+  }
+  if (entry.canApplyLeftToRight) {
+    return { label: "←", className: "action-left", title: "当前仅可采用左侧" };
+  }
+  if (entry.canApplyRightToLeft) {
+    return { label: "→", className: "action-right", title: "当前仅可采用右侧" };
+  }
+  return { label: "⛔", className: "action-blocked", title: "当前不可裁决" };
+}
+
+type BiDiffTaskStatus = "queued" | "submitted" | "processing" | "completed" | "failed";
+
+type BiDiffTask = {
+  key: string;
+  folderId: string;
+  deviceId: string;
+  path: string;
+  direction: "left-to-right" | "right-to-left";
+  status: BiDiffTaskStatus;
+  error?: string;
+  updatedAt: number;
+};
+
+type BiDiffTreeNode = {
+  key: string;
+  name: string;
+  fullPath: string;
+  type: "dir" | "file";
+  entry?: BiDiffEntry;
+  children: BiDiffTreeNode[];
+};
+
+type BiDiffTreeRow =
+  | {
+      type: "dir";
+      key: string;
+      node: BiDiffTreeNode;
+      depth: number;
+      guides: boolean[];
+      isLast: boolean;
+      entries: BiDiffEntry[];
+    }
+  | {
+      type: "file";
+      key: string;
+      node: BiDiffTreeNode;
+      depth: number;
+      guides: boolean[];
+      isLast: boolean;
+      entry: BiDiffEntry;
+    };
+
+function bidiffTaskKey(folderId: string, deviceId: string, direction: "left-to-right" | "right-to-left", path: string): string {
+  return `${folderId}::${deviceId}::${direction}::${path}`;
+}
+
+function splitTreePath(path: string): string[] {
+  return path.split(/[\\/]+/).filter(Boolean);
+}
+
+function buildBiDiffTree(entries: BiDiffEntry[]): BiDiffTreeNode[] {
+  const roots: BiDiffTreeNode[] = [];
+  const directories = new Map<string, BiDiffTreeNode>();
+
+  for (const entry of entries) {
+    const parts = splitTreePath(entry.path);
+    if (parts.length === 0) {
+      continue;
+    }
+    let parentChildren = roots;
+    let currentPath = "";
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i];
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      const isLeaf = i === parts.length - 1;
+      if (isLeaf) {
+        parentChildren.push({
+          key: `file:${entry.path}`,
+          name: part,
+          fullPath: entry.path,
+          type: "file",
+          entry,
+          children: [],
+        });
+        continue;
+      }
+      let dir = directories.get(currentPath);
+      if (!dir) {
+        dir = {
+          key: `dir:${currentPath}`,
+          name: part,
+          fullPath: currentPath,
+          type: "dir",
+          children: [],
+        };
+        directories.set(currentPath, dir);
+        parentChildren.push(dir);
+      }
+      parentChildren = dir.children;
+    }
+  }
+
+  const sortNodes = (nodes: BiDiffTreeNode[]) => {
+    nodes.sort((a, b) => {
+      if (a.type !== b.type) {
+        return a.type === "dir" ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name, "zh-CN");
+    });
+    for (const node of nodes) {
+      if (node.children.length > 0) {
+        sortNodes(node.children);
+      }
+    }
+  };
+
+  sortNodes(roots);
+  return roots;
+}
+
+function collectBiDiffLeafEntries(node: BiDiffTreeNode): BiDiffEntry[] {
+  if (node.type === "file" && node.entry) {
+    return [node.entry];
+  }
+  const result: BiDiffEntry[] = [];
+  for (const child of node.children) {
+    result.push(...collectBiDiffLeafEntries(child));
+  }
+  return result;
+}
+
+function hasExpandedDirDescendant(node: BiDiffTreeNode, expanded: Record<string, boolean>): boolean {
+  for (const child of node.children) {
+    if (child.type === "dir") {
+      if (expanded[child.key] !== false || hasExpandedDirDescendant(child, expanded)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function flattenBiDiffTree(nodes: BiDiffTreeNode[], expanded: Record<string, boolean>, depth = 0, guides: boolean[] = []): BiDiffTreeRow[] {
+  const rows: BiDiffTreeRow[] = [];
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+    const isLast = index === nodes.length - 1;
+    if (node.type === "dir") {
+      rows.push({
+        type: "dir",
+        key: node.key,
+        node,
+        depth,
+        guides,
+        isLast,
+        entries: collectBiDiffLeafEntries(node),
+      });
+      if (expanded[node.key] !== false) {
+        rows.push(...flattenBiDiffTree(node.children, expanded, depth + 1, [...guides, !isLast]));
+      }
+    } else if (node.entry) {
+      rows.push({
+        type: "file",
+        key: node.key,
+        node,
+        depth,
+        guides,
+        isLast,
+        entry: node.entry,
+      });
+    }
+  }
+  return rows;
+}
+
+function bidiffTaskLabel(status: BiDiffTaskStatus): string {
+  switch (status) {
+    case "queued":
+      return "已选中";
+    case "submitted":
+      return "已提交";
+    case "processing":
+      return "处理中";
+    case "completed":
+      return "已完成";
+    case "failed":
+      return "失败";
+    default:
+      return status;
+  }
+}
+
+function bidiffTaskTone(status: BiDiffTaskStatus): "success" | "warning" | "danger" | "muted" | "info" {
+  switch (status) {
+    case "queued":
+      return "info";
+    case "submitted":
+    case "processing":
+      return "warning";
+    case "completed":
+      return "success";
+    case "failed":
+      return "danger";
+    default:
+      return "muted";
+  }
+}
+
+function bidiffTaskPercent(status: BiDiffTaskStatus): number {
+  switch (status) {
+    case "queued":
+      return 18;
+    case "submitted":
+      return 42;
+    case "processing":
+      return 72;
+    case "completed":
+    case "failed":
+      return 100;
+    default:
+      return 0;
+  }
+}
+
 function completionPercent(value?: CompletionStatus): number {
   if (!value) {
     return 0;
@@ -409,7 +862,29 @@ type ColumnDef = {
   label: string;
   width: number;
   minWidth?: number;
+  visible?: boolean;
 };
+
+type BiDiffDensity = "relaxed" | "normal" | "compact" | "tight";
+
+function biDiffColumnsForDensity(density: BiDiffDensity, actionVisible = false): ColumnDef[] {
+  const presets: Record<BiDiffDensity, Record<string, number>> = {
+    relaxed: { checkbox: 40, leftSize: 104, leftTime: 118, action: 72, summary: 376, rightTime: 118, rightSize: 104 },
+    normal: { checkbox: 40, leftSize: 90, leftTime: 100, action: 62, summary: 324, rightTime: 100, rightSize: 90 },
+    compact: { checkbox: 36, leftSize: 82, leftTime: 92, action: 56, summary: 288, rightTime: 92, rightSize: 82 },
+    tight: { checkbox: 34, leftSize: 74, leftTime: 84, action: 52, summary: 252, rightTime: 84, rightSize: 74 },
+  };
+  const preset = presets[density];
+  return [
+    { key: "checkbox", label: "", width: preset.checkbox, minWidth: 26 },
+    { key: "leftSize", label: "左侧大小", width: preset.leftSize, minWidth: 64 },
+    { key: "leftTime", label: "左侧时间", width: preset.leftTime, minWidth: 76 },
+    { key: "action", label: "裁决", width: preset.action, minWidth: 48, visible: actionVisible },
+    { key: "summary", label: "名称 / 路径", width: preset.summary, minWidth: 180 },
+    { key: "rightTime", label: "右侧时间", width: preset.rightTime, minWidth: 76 },
+    { key: "rightSize", label: "右侧大小", width: preset.rightSize, minWidth: 64 },
+  ];
+}
 
 function beginColumnResize(
   clientX: number,
@@ -424,7 +899,7 @@ function beginColumnResize(
   const startWidth = column.width;
   const handlePointerMove = (moveEvent: PointerEvent) => {
     const delta = moveEvent.clientX - clientX;
-    const newWidth = Math.max(column.minWidth ?? 60, startWidth + delta);
+    const newWidth = Math.max(20, startWidth + delta);
     const newColumns = [...columns];
     newColumns[columnIndex] = { ...newColumns[columnIndex], width: newWidth };
     onColumnsChange(newColumns);
@@ -445,13 +920,16 @@ function ResizableTable(props: {
   columns: ColumnDef[];
   onColumnsChange: (columns: ColumnDef[]) => void;
   children: ReactNode;
+  className?: string;
+  style?: CSSProperties;
 }) {
+  const visibleColumns = props.columns.filter((col) => col.visible !== false);
   return (
-    <div className="compare-table-wrapper">
+    <div className={`compare-table-wrapper${props.className ? ` ${props.className}` : ""}`} style={props.style}>
       <table className="compare-table">
         <colgroup>
-          {props.columns.map((col) => (
-            <col key={col.key} style={{ width: col.width }} />
+          {visibleColumns.map((col) => (
+            <col key={col.key} style={{ width: col.width, minWidth: 0 }} />
           ))}
         </colgroup>
         {props.children}
@@ -461,7 +939,8 @@ function ResizableTable(props: {
 }
 
 function renderResizableHeaders(columns: ColumnDef[], onColumnsChange: (columns: ColumnDef[]) => void) {
-  return columns.map((col) => (
+  const visibleColumns = columns.filter((col) => col.visible !== false);
+  return visibleColumns.map((col) => (
     <th key={col.key}>
       {col.label}
       {col.key !== "checkbox" && (
@@ -482,9 +961,16 @@ function renderResizableHeaders(columns: ColumnDef[], onColumnsChange: (columns:
 }
 
 function FileVersionCell(props: {
-  file?: CompareEntry["local"] | CompareEntry["remote"] | PendingPublishEntry["local"] | PendingPublishEntry["global"];
+  file?:
+    | CompareEntry["local"]
+    | CompareEntry["remote"]
+    | PendingPublishEntry["local"]
+    | PendingPublishEntry["global"]
+    | BiDiffEntry["left"]
+    | BiDiffEntry["right"];
   missingLabel: string;
   tone?: "success" | "warning" | "danger" | "muted" | "info";
+  dateMode?: "full" | "compact";
 }) {
   if (!props.file) {
     return (
@@ -501,9 +987,71 @@ function FileVersionCell(props: {
         <span>{fileTypeLabel(props.file.type)}</span>
       </div>
       <div className="compare-side-secondary">
-        <span>{formatDate(props.file.modified)}</span>
+        <span>{formatDate(props.file.modified, props.dateMode ?? "full")}</span>
         <span>{props.file.deleted ? "路径已删除" : "存在"}</span>
       </div>
+    </div>
+  );
+}
+
+function BiDiffSizeCell(props: {
+  file?: BiDiffEntry["left"] | BiDiffEntry["right"];
+  missingLabel: string;
+}) {
+  if (!props.file) {
+    return (
+      <div className="compare-side-cell compare-side-cell-missing tone-muted">
+        <span className="compare-side-cell-empty">{props.missingLabel}</span>
+      </div>
+    );
+  }
+  const isMuted = props.file.size === 0;
+  const tone = isMuted ? "muted" : "success";
+  return (
+    <div className={`compare-side-cell tone-${tone}`}>
+      <span className="compare-side-cell-value">{formatBinary(props.file.size)}</span>
+    </div>
+  );
+}
+
+function BiDiffTimeCell(props: {
+  file?: BiDiffEntry["left"] | BiDiffEntry["right"];
+  missingLabel: string;
+  dateMode?: "full" | "compact";
+}) {
+  if (!props.file) {
+    return (
+      <div className="compare-side-cell compare-side-cell-missing tone-muted">
+        <span className="compare-side-cell-empty">{props.missingLabel}</span>
+      </div>
+    );
+  }
+  const isMuted = props.file.size === 0;
+  const tone = isMuted ? "muted" : "success";
+  return (
+    <div className={`compare-side-cell tone-${tone}`}>
+      <span className="compare-side-cell-value">{formatDate(props.file.modified, props.dateMode ?? "compact")}</span>
+    </div>
+  );
+}
+
+function BiDiffPresenceCell(props: {
+  file?: BiDiffEntry["left"] | BiDiffEntry["right"];
+  missingLabel?: string;
+  tone?: "success" | "warning" | "danger" | "muted" | "info";
+}) {
+  const state = !props.file ? "missing" : props.file.deleted ? "deleted" : "live";
+  const label = !props.file ? props.missingLabel ?? "不存在" : props.file.deleted ? "路径已删除" : "存在";
+  const symbol = state === "live" ? "●" : state === "deleted" ? "⊘" : "∅";
+  return (
+    <div
+      className={`compare-side compare-side-state compare-side-state-${state}${props.tone ? ` tone-${props.tone}` : ""}`}
+      title={label}
+      aria-label={label}
+    >
+      <span className={`compare-side-state-symbol state-${state}`} aria-hidden="true">
+        {symbol}
+      </span>
     </div>
   );
 }
@@ -518,6 +1066,51 @@ function ProgressBar(props: { percent: number; tone?: "success" | "warning" | "d
       </div>
       <div className="progress-value">{percent.toFixed(0)}%</div>
     </div>
+  );
+}
+
+function TreeCheckbox(props: {
+  checked: boolean;
+  indeterminate?: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  const ref = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (ref.current) {
+      ref.current.indeterminate = Boolean(props.indeterminate && !props.checked);
+    }
+  }, [props.checked, props.indeterminate]);
+
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      className="compare-checkbox"
+      checked={props.checked}
+      disabled={props.disabled}
+      onChange={(event) => props.onChange(event.target.checked)}
+    />
+  );
+}
+
+function TreePrefix(props: { depth: number; guides: boolean[]; isLast: boolean }) {
+  if (props.depth === 0) {
+    return null;
+  }
+  return (
+    <span className="tree-prefix" aria-hidden="true">
+      {props.guides.map((hasGuide, index) => {
+        const isBranch = index === props.guides.length - 1;
+        return (
+          <span
+            key={`${index}-${hasGuide ? "1" : "0"}`}
+            className={`tree-prefix-segment${hasGuide ? " has-guide" : ""}${isBranch ? " branch" : ""}${isBranch && props.isLast ? " is-last" : ""}`}
+          />
+        );
+      })}
+    </span>
   );
 }
 
@@ -549,6 +1142,15 @@ function App() {
   const [compareSelection, setCompareSelection] = useState<Record<string, boolean>>({});
   const [compareMessage, setCompareMessage] = useState("");
 
+  const [bidiff, setBiDiff] = useState<BiDiffResult | null>(null);
+  const [bidiffBusy, setBiDiffBusy] = useState(false);
+  const [bidiffError, setBiDiffError] = useState("");
+  const [bidiffView, setBiDiffView] = useState("different");
+  const [bidiffPrefix, setBiDiffPrefix] = useState("");
+  const [bidiffSelection, setBiDiffSelection] = useState<Record<string, boolean>>({});
+  const [bidiffMessage, setBiDiffMessage] = useState("");
+  const [bidiffTasks, setBiDiffTasks] = useState<Record<string, BiDiffTask>>({});
+
   const [publish, setPublish] = useState<PendingPublishResult | null>(null);
   const [publishBusy, setPublishBusy] = useState(false);
   const [publishError, setPublishError] = useState("");
@@ -556,6 +1158,7 @@ function App() {
   const [publishPrefix, setPublishPrefix] = useState("");
   const [publishSelection, setPublishSelection] = useState<Record<string, boolean>>({});
   const [publishMessage, setPublishMessage] = useState("");
+  const [panelScanBusy, setPanelScanBusy] = useState<"" | "compare" | "bidiff" | "publish">("");
 
   const [folderEditorOpen, setFolderEditorOpen] = useState(false);
   const [folderDraft, setFolderDraft] = useState<FolderConfig | null>(null);
@@ -575,6 +1178,7 @@ function App() {
   const [optionsSaveMessage, setOptionsSaveMessage] = useState("");
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [receiveModalOpen, setReceiveModalOpen] = useState(false);
+  const [bidiffModalOpen, setBiDiffModalOpen] = useState(false);
   const [publishModalOpen, setPublishModalOpen] = useState(false);
   const [systemActionBusy, setSystemActionBusy] = useState<"" | "restart" | "shutdown">("");
   const [systemActionMessage, setSystemActionMessage] = useState("");
@@ -711,6 +1315,65 @@ function App() {
     }
   }, [comparePrefix, compareView, selectedDeviceId, selectedFolder]);
 
+  const refreshCompare = useCallback(async (rescanLocal: boolean) => {
+    if (!selectedFolder) {
+      return;
+    }
+    if (rescanLocal) {
+      setPanelScanBusy("compare");
+      try {
+        await triggerFolderScan(selectedFolder.id);
+      } finally {
+        setPanelScanBusy("");
+      }
+    }
+    await loadCompare();
+  }, [loadCompare, selectedFolder]);
+
+  const loadBiDiff = useCallback(async () => {
+    if (!selectedFolder || !selectedDeviceId) {
+      setBiDiff(null);
+      return;
+    }
+
+    setBiDiffBusy(true);
+    setBiDiffError("");
+    try {
+      const data = await getJSON<BiDiffResult>(
+        `/rest/db/bidiff?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(bidiffView)}&prefix=${encodeURIComponent(bidiffPrefix)}&page=1&perpage=500`,
+      );
+      setBiDiff(data);
+      setBiDiffSelection((previous) => {
+        const next: Record<string, boolean> = {};
+        for (const entry of data.entries) {
+          if (previous[entry.path] && (entry.canApplyLeftToRight || entry.canApplyRightToLeft)) {
+            next[entry.path] = true;
+          }
+        }
+        return next;
+      });
+    } catch (error) {
+      setBiDiffError(error instanceof Error ? error.message : "加载双向差异裁决失败");
+    } finally {
+      setBiDiffBusy(false);
+    }
+  }, [bidiffPrefix, bidiffView, selectedDeviceId, selectedFolder]);
+
+  const refreshBiDiff = useCallback(async (rescanLocal: boolean) => {
+    if (!selectedFolder) {
+      return;
+    }
+    if (rescanLocal) {
+      setPanelScanBusy("bidiff");
+      try {
+        await triggerFolderScan(selectedFolder.id);
+      } finally {
+        setPanelScanBusy("");
+      }
+    }
+    await loadBiDiff();
+  }, [loadBiDiff, selectedFolder]);
+
   const loadPublish = useCallback(async () => {
     if (!selectedFolder) {
       setPublish(null);
@@ -739,6 +1402,21 @@ function App() {
       setPublishBusy(false);
     }
   }, [publishPrefix, publishView, selectedFolder]);
+
+  const refreshPublish = useCallback(async (rescanLocal: boolean) => {
+    if (!selectedFolder) {
+      return;
+    }
+    if (rescanLocal) {
+      setPanelScanBusy("publish");
+      try {
+        await triggerFolderScan(selectedFolder.id);
+      } finally {
+        setPanelScanBusy("");
+      }
+    }
+    await loadPublish();
+  }, [loadPublish, selectedFolder]);
 
   useEffect(() => {
     void loadBootstrap();
@@ -794,23 +1472,73 @@ function App() {
     if (!receiveModalOpen || !selectedFolder || !selectedDeviceId) {
       return;
     }
-    void loadCompare();
+    void refreshCompare(true);
     const handle = window.setInterval(() => {
-      void loadCompare();
+      void refreshCompare(!selectedFolder.fsWatcherEnabled);
     }, panelRefreshSeconds * 1000);
     return () => window.clearInterval(handle);
-  }, [loadCompare, panelRefreshSeconds, selectedDeviceId, selectedFolder, receiveModalOpen]);
+  }, [panelRefreshSeconds, receiveModalOpen, refreshCompare, selectedDeviceId, selectedFolder]);
+
+  useEffect(() => {
+    if (!bidiffModalOpen || !selectedFolder || !selectedDeviceId) {
+      return;
+    }
+    void refreshBiDiff(true);
+    const handle = window.setInterval(() => {
+      void refreshBiDiff(!selectedFolder.fsWatcherEnabled);
+    }, panelRefreshSeconds * 1000);
+    return () => window.clearInterval(handle);
+  }, [bidiffModalOpen, panelRefreshSeconds, refreshBiDiff, selectedDeviceId, selectedFolder]);
+
+  useEffect(() => {
+    if (!selectedFolder || !selectedDeviceId) {
+      return;
+    }
+    setBiDiffTasks((previous) => {
+      const next = { ...previous };
+      const entryMap = new Map((bidiff?.entries ?? []).map((entry) => [entry.path, entry]));
+      let changed = false;
+      for (const [key, task] of Object.entries(previous)) {
+        if (task.folderId !== selectedFolder.id || task.deviceId !== selectedDeviceId) {
+          continue;
+        }
+        if (task.status === "failed" || task.status === "completed") {
+          continue;
+        }
+        const entry = entryMap.get(task.path);
+        const stillActionable =
+          task.direction === "left-to-right" ? entry?.canApplyLeftToRight : entry?.canApplyRightToLeft;
+        let nextStatus = task.status;
+        if (!entry || !stillActionable) {
+          nextStatus = "completed";
+        } else if (
+          completions[selectedDeviceId]?.[selectedFolder.id]?.remoteState === "syncing" ||
+          completions[selectedDeviceId]?.[selectedFolder.id]?.remoteState === "scanning" ||
+          bidiffBusy
+        ) {
+          nextStatus = "processing";
+        } else if (task.status === "queued") {
+          nextStatus = "submitted";
+        }
+        if (nextStatus !== task.status) {
+          next[key] = { ...task, status: nextStatus, updatedAt: Date.now() };
+          changed = true;
+        }
+      }
+      return changed ? next : previous;
+    });
+  }, [bidiff, bidiffBusy, completions, selectedDeviceId, selectedFolder]);
 
   useEffect(() => {
     if (!publishModalOpen || !selectedFolder) {
       return;
     }
-    void loadPublish();
+    void refreshPublish(true);
     const handle = window.setInterval(() => {
-      void loadPublish();
+      void refreshPublish(!selectedFolder.fsWatcherEnabled);
     }, panelRefreshSeconds * 1000);
     return () => window.clearInterval(handle);
-  }, [loadPublish, panelRefreshSeconds, selectedFolder, publishModalOpen]);
+  }, [panelRefreshSeconds, publishModalOpen, refreshPublish, selectedFolder]);
 
   const discoverySummary = useMemo(() => {
     const discovery = system?.discoveryStatus ?? {};
@@ -838,6 +1566,26 @@ function App() {
     () => (compare?.entries ?? []).filter((entry) => entry.canPrioritize),
     [compare],
   );
+
+  const bidiffVisibleLeftToRightEntries = useMemo(
+    () => (bidiff?.entries ?? []).filter((entry) => entry.canApplyLeftToRight),
+    [bidiff],
+  );
+
+  const bidiffVisibleRightToLeftEntries = useMemo(
+    () => (bidiff?.entries ?? []).filter((entry) => entry.canApplyRightToLeft),
+    [bidiff],
+  );
+
+  const activeBiDiffTasks = useMemo(() => {
+    if (!selectedFolder || !selectedDeviceId) {
+      return [];
+    }
+    return Object.values(bidiffTasks)
+      .filter((task) => task.folderId === selectedFolder.id && task.deviceId === selectedDeviceId)
+      .filter((task) => task.status !== "completed")
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  }, [bidiffTasks, selectedDeviceId, selectedFolder]);
 
   const publishVisibleEntries = useMemo(
     () => (publish?.entries ?? []).filter((entry) => entry.canPublish),
@@ -893,9 +1641,69 @@ function App() {
         });
       }
       setCompareMessage(compare.manualSync ? "已提交同步请求。" : "已提交优先处理请求。");
-      await Promise.all([loadCompare(), loadBootstrap()]);
+      await Promise.all([refreshCompare(true), loadBootstrap()]);
     } catch (error) {
       setCompareMessage(error instanceof Error ? error.message : "提交请求失败");
+    }
+  };
+
+  const applyBiDiffEntries = async (direction: "left-to-right" | "right-to-left", entries: BiDiffEntry[]) => {
+    if (!selectedFolder || !selectedDeviceId) {
+      return;
+    }
+    if (entries.length === 0) {
+      setBiDiffMessage("当前没有可执行的已选条目。");
+      return;
+    }
+    const directionLabel = direction === "left-to-right" ? "采用左侧到右侧" : "采用右侧到左侧";
+    const summary = entries.length === 1 ? `\n\n${entries[0].path}` : `\n\n共 ${entries.length} 项`;
+    if (!window.confirm(`确认执行“${directionLabel}”？${summary}`)) {
+      return;
+    }
+    const now = Date.now();
+    setBiDiffTasks((previous) => {
+      const next = { ...previous };
+      for (const entry of entries) {
+        const key = bidiffTaskKey(selectedFolder.id, selectedDeviceId, direction, entry.path);
+        next[key] = {
+          key,
+          folderId: selectedFolder.id,
+          deviceId: selectedDeviceId,
+          path: entry.path,
+          direction,
+          status: "submitted",
+          updatedAt: now,
+        };
+      }
+      return next;
+    });
+    setBiDiffMessage(direction === "left-to-right" ? "正在采用左侧状态..." : "正在采用右侧状态...");
+    try {
+      await postJSON(
+        `/rest/db/bidiffapply?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}`,
+        {
+          direction,
+          files: entries.map((entry) => entry.path),
+        },
+      );
+      setBiDiffMessage(direction === "left-to-right" ? "已提交左侧到右侧的裁决动作。" : "已提交右侧到左侧的裁决动作。");
+      setBiDiffSelection({});
+      await Promise.all([refreshBiDiff(true), loadBootstrap(), refreshCompare(true), refreshPublish(true)]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "双向裁决提交失败";
+      setBiDiffTasks((previous) => {
+        const next = { ...previous };
+        for (const entry of entries) {
+          const key = bidiffTaskKey(selectedFolder.id, selectedDeviceId, direction, entry.path);
+          const current = next[key];
+          if (!current) {
+            continue;
+          }
+          next[key] = { ...current, status: "failed", error: message, updatedAt: Date.now() };
+        }
+        return next;
+      });
+      setBiDiffMessage(message);
     }
   };
 
@@ -909,7 +1717,7 @@ function App() {
         files: entries.map((entry) => entry.path),
       });
       setPublishMessage("已提交发布请求。远端会按自己的接收策略处理。");
-      await Promise.all([loadPublish(), loadBootstrap()]);
+      await Promise.all([refreshPublish(true), loadBootstrap()]);
     } catch (error) {
       setPublishMessage(error instanceof Error ? error.message : "发布请求失败");
     }
@@ -1488,6 +2296,10 @@ function App() {
                   setSelectedFolderId(folder.id);
                   setReceiveModalOpen(true);
                 }}
+                onOpenBiDiff={(folder) => {
+                  setSelectedFolderId(folder.id);
+                  setBiDiffModalOpen(true);
+                }}
                 onOpenPublish={(folder) => {
                   setSelectedFolderId(folder.id);
                   setPublishModalOpen(true);
@@ -1587,12 +2399,50 @@ function App() {
             compareSelection={compareSelection}
             onCompareSelectionChange={setCompareSelection}
             compareMessage={compareMessage}
-            onRefresh={() => void loadCompare()}
+            onRefresh={() => void refreshCompare(true)}
             onSyncSelected={() =>
               void syncEntries((compare?.entries ?? []).filter((entry) => compareSelection[entry.path] && entry.canPrioritize))
             }
             onSyncVisible={() => void syncEntries(compareVisibleEntries)}
             remoteCompletion={selectedDeviceId ? completions[selectedDeviceId]?.[selectedFolder.id] : undefined}
+          />
+        </ModalShell>
+      )}
+
+      {bidiffModalOpen && selectedFolder && (
+        <ModalShell title={`双向差异裁决 - ${folderLabel(selectedFolder)}`} onClose={() => setBiDiffModalOpen(false)}>
+          <BiDiffPanel
+            folder={selectedFolder}
+            devices={selectedFolderDevices}
+            selectedDeviceId={selectedDeviceId}
+            onSelectDevice={setSelectedDeviceId}
+            selectedDevice={selectedDevice}
+            bidiff={bidiff}
+            bidiffBusy={bidiffBusy}
+            bidiffError={bidiffError}
+            bidiffView={bidiffView}
+            onBidiffViewChange={setBiDiffView}
+            bidiffPrefix={bidiffPrefix}
+            onBidiffPrefixChange={setBiDiffPrefix}
+            bidiffSelection={bidiffSelection}
+            onBidiffSelectionChange={setBiDiffSelection}
+            bidiffMessage={bidiffMessage}
+            onRefresh={() => void refreshBiDiff(true)}
+            onApplyLeftToRight={() =>
+              void applyBiDiffEntries(
+                "left-to-right",
+                (bidiff?.entries ?? []).filter((entry) => bidiffSelection[entry.path] && entry.canApplyLeftToRight),
+              )
+            }
+            onApplyRightToLeft={() =>
+              void applyBiDiffEntries(
+                "right-to-left",
+                (bidiff?.entries ?? []).filter((entry) => bidiffSelection[entry.path] && entry.canApplyRightToLeft),
+              )
+            }
+            remoteCompletion={selectedDeviceId ? completions[selectedDeviceId]?.[selectedFolder.id] : undefined}
+            scanBusy={panelScanBusy === "bidiff"}
+            activeTasks={activeBiDiffTasks}
           />
         </ModalShell>
       )}
@@ -1611,7 +2461,7 @@ function App() {
             publishSelection={publishSelection}
             onPublishSelectionChange={setPublishSelection}
             publishMessage={publishMessage}
-            onRefresh={() => void loadPublish()}
+            onRefresh={() => void refreshPublish(true)}
             onPublishSelected={() =>
               void publishEntries((publish?.entries ?? []).filter((entry) => publishSelection[entry.path] && entry.canPublish))
             }
@@ -1650,6 +2500,7 @@ function OverviewPanel(props: {
   onToggleExpand: (folderId: string) => void;
   onSelectFolder: (folderId: string) => void;
   onOpenReceive: (folder: FolderConfig) => void;
+  onOpenBiDiff: (folder: FolderConfig) => void;
   onOpenPublish: (folder: FolderConfig) => void;
   onEditFolder: (folder: FolderConfig) => void;
   onEditDevice: (device: DeviceConfig) => void;
@@ -1666,7 +2517,7 @@ function OverviewPanel(props: {
     { key: "need", label: "待同步", width: 55, minWidth: 40 },
     { key: "error", label: "错误", width: 45, minWidth: 35 },
     { key: "devices", label: "远端设备", width: 90, minWidth: 60 },
-    { key: "actions", label: "操作", width: 130, minWidth: 100 },
+    { key: "actions", label: "操作", width: 224, minWidth: 180 },
   ]);
 
   const handleOvResize = (colIndex: number, clientX: number) => {
@@ -1764,6 +2615,9 @@ function OverviewPanel(props: {
                 <div className="ov-cell ov-cell-actions">
                   <button className="mini-button" onClick={() => props.onRescan(folder)} title="刷新状态">↻</button>
                   <button className="mini-button" onClick={() => props.onEditFolder(folder)} title="编辑设置">✎</button>
+                  <button className="mini-button secondary" onClick={() => props.onOpenBiDiff(folder)} title="双向裁决">
+                    裁决
+                  </button>
                   <button
                     className="mini-button primary"
                     onClick={() => props.onOpenReceive(folder)}
@@ -1936,12 +2790,16 @@ function ReceiveReviewPanel(props: {
           <span>可操作 {entries.filter((entry) => entry.canPrioritize).length} 项</span>
           <span>已选 {selectedCount} 项</span>
         </div>
-        <div className="review-mobile-hint">手机建议横屏查看；表格可左右滑动，按住列头分隔线可调整列宽。</div>
+        <div className="review-mobile-hint">手机建议横屏查看；表格可左右滑动，按住列头分隔线可调整列宽。若 Android 内置 WebGUI 操作不顺，建议改用“在浏览器中打开”后再查看。</div>
 
         {props.compareMessage && <div className="inline-message info">{props.compareMessage}</div>}
         {props.compareError && <div className="inline-message danger">{props.compareError}</div>}
 
-        <ResizableTable columns={columns} onColumnsChange={setColumns}>
+        <ResizableTable
+          columns={columns}
+          onColumnsChange={setColumns}
+          className={`bidiff-table bidiff-font-${fontScale} bidiff-density-${density}`}
+        >
           <thead>
             <tr>{renderResizableHeaders(columns, setColumns)}</tr>
           </thead>
@@ -2078,6 +2936,551 @@ function ReceiveReviewPanel(props: {
   );
 }
 
+function BiDiffPanel(props: {
+  folder: FolderConfig;
+  devices: DeviceConfig[];
+  selectedDeviceId: string;
+  onSelectDevice: (value: string) => void;
+  selectedDevice: DeviceConfig | null;
+  bidiff: BiDiffResult | null;
+  bidiffBusy: boolean;
+  bidiffError: string;
+  bidiffView: string;
+  onBidiffViewChange: (value: string) => void;
+  bidiffPrefix: string;
+  onBidiffPrefixChange: (value: string) => void;
+  bidiffSelection: Record<string, boolean>;
+  onBidiffSelectionChange: (value: Record<string, boolean>) => void;
+  bidiffMessage: string;
+  onRefresh: () => void;
+  onApplyLeftToRight: () => void;
+  onApplyRightToLeft: () => void;
+  remoteCompletion?: CompletionStatus;
+  scanBusy: boolean;
+  activeTasks: BiDiffTask[];
+}) {
+  const entries = useMemo(() => (props.bidiff?.entries ?? []).filter((entry) => !isGuiInertBiDiffEntry(entry)), [props.bidiff?.entries]);
+  const selectedLeftToRight = entries.filter((entry) => props.bidiffSelection[entry.path] && entry.canApplyLeftToRight).length;
+  const selectedRightToLeft = entries.filter((entry) => props.bidiffSelection[entry.path] && entry.canApplyRightToLeft).length;
+  const hasSelection = selectedLeftToRight > 0 || selectedRightToLeft > 0;
+  const [sidebarWidth, setSidebarWidth] = useState(() => readStoredPixels(BIDIFF_SIDEBAR_WIDTH_KEY, 280, 220, 420));
+  const [timeMode, setTimeMode] = useState<"compact" | "full">(() => {
+    try {
+      const raw = window.localStorage.getItem(BIDIFF_TIME_MODE_KEY);
+      return raw === "full" ? "full" : "compact";
+    } catch {
+      return "compact";
+    }
+  });
+  const [fontScale, setFontScale] = useState<"xsmall" | "small" | "compact" | "normal" | "medium" | "large" | "xlarge">(() =>
+    readStoredChoice(BIDIFF_FONT_SCALE_KEY, "normal", ["xsmall", "small", "compact", "normal", "medium", "large", "xlarge"] as const)
+  );
+  const [density, setDensity] = useState<BiDiffDensity>(() =>
+    readStoredChoice(BIDIFF_DENSITY_KEY, "normal", ["relaxed", "normal", "compact", "tight"] as const)
+  );
+  const [treeMode, setTreeMode] = useState(true);
+  const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({});
+  const [columns, setColumns] = useState<ColumnDef[]>(() => biDiffColumnsForDensity(density, false));
+  const treeNodes = useMemo(() => buildBiDiffTree(entries), [entries]);
+  const treeRows = useMemo(() => flattenBiDiffTree(treeNodes, expandedDirs), [treeNodes, expandedDirs]);
+
+  useEffect(() => {
+    setExpandedDirs((previous) => {
+      const next = { ...previous };
+      let changed = false;
+      for (const node of treeNodes) {
+        if (!(node.key in next)) {
+          next[node.key] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : previous;
+    });
+  }, [treeNodes]);
+
+  if (props.devices.length === 0) {
+    return (
+      <div className="review-modal-layout">
+        <div className="review-modal-main">
+          <div className="empty-mini">这个文件夹当前没有共享设备，所以没有可裁决的右侧索引。</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="review-modal-layout" style={{ gridTemplateColumns: `minmax(0, 1fr) ${sidebarWidth}px` }}>
+      <div className="review-modal-main">
+        <div className="review-toolbar review-toolbar-bidiff">
+          <label>
+            <span>裁决列</span>
+            <button
+              className="mini-button"
+              onClick={() => {
+                setColumns((prev) =>
+                  prev.map((col) => (col.key === "action" ? { ...col, visible: col.visible === false ? true : false } : col))
+                );
+              }}
+              title={columns.find((c) => c.key === "action")?.visible !== false ? "隐藏裁决列" : "显示裁决列"}
+            >
+              {columns.find((c) => c.key === "action")?.visible !== false ? "隐藏" : "显示"}
+            </button>
+          </label>
+          <label>
+            <span>紧凑模式</span>
+            <select
+              value={density}
+              onChange={(event) => {
+                const chosen = event.target.value as BiDiffDensity;
+                const mode: BiDiffDensity = ["relaxed", "normal", "compact", "tight"].includes(chosen) ? chosen : "normal";
+                setDensity(mode);
+                setColumns((previous) => {
+                  const actionVisible = previous.find((col) => col.key === "action")?.visible !== false;
+                  return biDiffColumnsForDensity(mode, actionVisible);
+                });
+                try {
+                  window.localStorage.setItem(BIDIFF_DENSITY_KEY, mode);
+                } catch {
+                  // Ignore storage failures.
+                }
+              }}
+            >
+              <option value="relaxed">宽松</option>
+              <option value="normal">标准</option>
+              <option value="compact">紧凑</option>
+              <option value="tight">极紧凑</option>
+            </select>
+          </label>
+          <label>
+            <span>查看范围</span>
+            <select value={props.bidiffView} onChange={(event) => props.onBidiffViewChange(event.target.value)}>
+              {bidiffViewOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex-grow">
+            <span>路径前缀</span>
+            <input value={props.bidiffPrefix} onChange={(event) => props.onBidiffPrefixChange(event.target.value)} placeholder="目录 / 子目录" />
+          </label>
+          <label>
+            <span>显示方式</span>
+            <select value={treeMode ? "tree" : "flat"} onChange={(event) => setTreeMode(event.target.value === "tree")}>
+              <option value="tree">树状目录</option>
+              <option value="flat">平铺文件</option>
+            </select>
+          </label>
+          <label>
+            <span>时间显示</span>
+            <select
+              value={timeMode}
+              onChange={(event) => {
+                const next = event.target.value === "full" ? "full" : "compact";
+                setTimeMode(next);
+                try {
+                  window.localStorage.setItem(BIDIFF_TIME_MODE_KEY, next);
+                } catch {
+                  // Ignore storage failures.
+                }
+              }}
+            >
+              <option value="compact">简略</option>
+              <option value="full">详细</option>
+            </select>
+          </label>
+          <label>
+            <span>列表字体</span>
+            <select
+              value={fontScale}
+              onChange={(event) => {
+                const next =
+                  event.target.value === "xsmall" ||
+                  event.target.value === "small" ||
+                  event.target.value === "compact" ||
+                  event.target.value === "medium" ||
+                  event.target.value === "large" ||
+                  event.target.value === "xlarge"
+                    ? event.target.value
+                    : "normal";
+                setFontScale(next);
+                try {
+                  window.localStorage.setItem(BIDIFF_FONT_SCALE_KEY, next);
+                } catch {
+                  // Ignore storage failures.
+                }
+              }}
+            >
+              <option value="xsmall">极小</option>
+              <option value="small">很小</option>
+              <option value="compact">紧凑</option>
+              <option value="normal">标准</option>
+              <option value="medium">稍大</option>
+              <option value="large">偏大</option>
+              <option value="xlarge">大号</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="review-stats">
+          <span className="badge tone-info">中立差异裁决</span>
+          <span className={`badge tone-${props.bidiff?.rightConnected ? "success" : "warning"}`}>{props.bidiff?.rightConnected ? "右侧已连接" : "右侧离线"}</span>
+          <span>右侧设备：{deviceName(props.selectedDevice ?? undefined)}</span>
+          <span>共 {props.bidiff?.total ?? 0} 项</span>
+          <span>左→右可执行 {entries.filter((entry) => entry.canApplyLeftToRight).length} 项</span>
+          <span>右→左可执行 {entries.filter((entry) => entry.canApplyRightToLeft).length} 项</span>
+          {treeMode && <span>目录视图 {treeNodes.length} 个顶层节点</span>}
+          <label className="review-inline-select">
+            <span>侧栏宽度</span>
+            <select
+              value={sidebarWidth}
+              onChange={(event) => {
+                const next = Number(event.target.value) || 280;
+                setSidebarWidth(next);
+                storePixels(BIDIFF_SIDEBAR_WIDTH_KEY, next);
+              }}
+            >
+              <option value={240}>窄</option>
+              <option value={280}>标准</option>
+              <option value={340}>宽</option>
+              <option value={400}>更宽</option>
+            </select>
+          </label>
+          {treeMode && (
+            <>
+              <button
+                className="ghost-button compact-button"
+                onClick={() => {
+                  const next: Record<string, boolean> = {};
+                  const walk = (nodes: BiDiffTreeNode[]) => {
+                    for (const node of nodes) {
+                      if (node.type === "dir") {
+                        next[node.key] = true;
+                        walk(node.children);
+                      }
+                    }
+                  };
+                  walk(treeNodes);
+                  setExpandedDirs(next);
+                }}
+              >
+                全部展开
+              </button>
+              <button
+                className="ghost-button compact-button"
+                onClick={() => {
+                  const next: Record<string, boolean> = {};
+                  const walk = (nodes: BiDiffTreeNode[]) => {
+                    for (const node of nodes) {
+                      if (node.type === "dir") {
+                        next[node.key] = false;
+                        walk(node.children);
+                      }
+                    }
+                  };
+                  walk(treeNodes);
+                  setExpandedDirs(next);
+                }}
+              >
+                全部折叠
+              </button>
+            </>
+          )}
+        </div>
+        {(!props.bidiff?.manualSync || !props.bidiff?.manualPublish) && (
+          <div className="inline-message warning">
+            当前文件夹还在自动同步模式。为了保证“只按你选中的文件裁决”，双向裁决建议与手动模式配合使用：
+            {!props.bidiff?.manualSync && " 先开启手动审核接收；"}
+            {!props.bidiff?.manualPublish && " 先开启手动审核发布；"}
+          </div>
+        )}
+        <div
+          className="review-mobile-hint"
+          title="默认只显示差异，不预设参考侧；先勾选再执行。手机建议横屏查看，若内置 WebGUI 操作不顺，建议改用系统浏览器。"
+        >
+          默认仅看差异，先勾选再执行；手机建议横屏。
+        </div>
+
+        {props.bidiffMessage && <div className="inline-message info">{props.bidiffMessage}</div>}
+        {props.bidiffError && <div className="inline-message danger">{props.bidiffError}</div>}
+
+        <ResizableTable
+          columns={columns}
+          onColumnsChange={setColumns}
+          className={`bidiff-table bidiff-font-${fontScale} bidiff-density-${density}`}
+        >
+          <thead>
+            <tr>{renderResizableHeaders(columns, setColumns)}</tr>
+          </thead>
+          <tbody>
+            {(treeMode ? treeRows : entries.map((entry) => ({ type: "file" as const, key: `file:${entry.path}`, node: { key: `file:${entry.path}`, name: entry.path, fullPath: entry.path, type: "file" as const, entry, children: [] }, depth: 0, entry }))).map((row) => {
+              if (row.type === "dir") {
+                const selectableEntries = row.entries.filter((entry) => entry.canApplyLeftToRight || entry.canApplyRightToLeft);
+                const selectedCount = selectableEntries.filter((entry) => props.bidiffSelection[entry.path]).length;
+                const allSelected = selectableEntries.length > 0 && selectedCount === selectableEntries.length;
+                const hasSelectedDescendants = selectedCount > 0;
+                const leftLiveCount = row.entries.filter((entry) => bidiffHasLiveFile(entry.left)).length;
+                const rightLiveCount = row.entries.filter((entry) => bidiffHasLiveFile(entry.right)).length;
+                const open = expandedDirs[row.node.key] !== false;
+                const branchActive = open || hasExpandedDirDescendant(row.node, expandedDirs);
+                return (
+                  <tr
+                    key={row.key}
+                    className={`compare-tree-row compare-tree-dir-row${hasSelectedDescendants ? " contains-selected" : ""}${open ? " is-open" : ""}${branchActive ? " branch-active" : ""}`}
+                  >
+                    <td>
+                      <TreeCheckbox
+                        checked={allSelected}
+                        indeterminate={selectedCount > 0 && !allSelected}
+                        disabled={selectableEntries.length === 0}
+                        onChange={(checked) => {
+                          const next = { ...props.bidiffSelection };
+                          for (const entry of selectableEntries) {
+                            next[entry.path] = checked;
+                          }
+                          props.onBidiffSelectionChange(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <div className="compare-dir-side">
+                        <span className="compare-dir-metric">{leftLiveCount}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="compare-dir-side">
+                        <span className="compare-dir-metric">-</span>
+                      </div>
+                    </td>
+                    {columns.find((c) => c.key === "action")?.visible !== false && (
+                      <td>
+                        <div className="compare-cell-center">
+                          <span className="badge compare-action-badge action-both" title="目录包含可裁决子项">
+                            ≡
+                          </span>
+                        </div>
+                      </td>
+                    )}
+                    <td>
+                      <div className="compare-tree-summary">
+                        <TreePrefix depth={row.depth} guides={row.guides} isLast={row.isLast} />
+                        <button
+                          className="tree-toggle"
+                          onClick={() => setExpandedDirs((previous) => ({ ...previous, [row.node.key]: !open }))}
+                          title={open ? "收起目录" : "展开目录"}
+                        >
+                          {open ? "▾" : "▸"}
+                        </button>
+                        <span className="tree-folder-chip" aria-hidden="true">▣</span>
+                        <span className="compare-tree-name compare-tree-dir-name">{row.node.name}</span>
+                        <span className="compare-tree-dir-summary">
+                          {row.entries.length} 项差异
+                          {hasSelectedDescendants ? ` / 已选 ${selectedCount}` : ""}
+                        </span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="compare-dir-side">
+                        <span className="compare-dir-metric">-</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="compare-dir-side">
+                        <span className="compare-dir-metric">{rightLiveCount}</span>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              }
+              const entry = row.entry;
+              const selected = Boolean(props.bidiffSelection[entry.path]);
+              const kind = bidiffKind(entry);
+              const renameRole = bidiffRenameRole(entry);
+              const canSelect = entry.canApplyLeftToRight || entry.canApplyRightToLeft;
+              const actionability = bidiffActionabilityLabel(entry);
+              const currentTask = props.activeTasks.find((task) => task.path === entry.path && task.status !== "completed");
+              const showAction = columns.find((c) => c.key === "action")?.visible !== false;
+              return (
+                <tr key={entry.path} className={`compare-tree-file-row tone-${statusTone(entry.status)} kind-${kind}${selected ? " selected" : ""}`}>
+                  <td>
+                    <TreeCheckbox
+                      checked={selected}
+                      disabled={!canSelect}
+                      onChange={(checked) =>
+                        props.onBidiffSelectionChange({
+                          ...props.bidiffSelection,
+                          [entry.path]: checked,
+                        })
+                      }
+                    />
+                  </td>
+                  <td>
+                    <BiDiffSizeCell file={entry.left} missingLabel="不存在" />
+                  </td>
+                  <td>
+                    <BiDiffTimeCell file={entry.left} missingLabel="不存在" dateMode={timeMode} />
+                  </td>
+                  {showAction && (
+                    <td>
+                      <div className="compare-cell-center compare-action-column">
+                        <span className={`badge compare-action-badge ${actionability.className}`} title={actionability.title}>
+                          {actionability.label}
+                        </span>
+                      </div>
+                    </td>
+                  )}
+                  <td>
+                    <div className="compare-status-cell compare-status-stack">
+                      {treeMode ? (
+                        <div className="compare-tree-fileline" title={entry.path}>
+                          <TreePrefix depth={row.depth} guides={row.guides} isLast={row.isLast} />
+                          <span className="tree-file-dot" aria-hidden="true" />
+                          <span className={`compare-tree-name compare-tree-file-name${renameRole === "new" ? " rename-new-path" : renameRole === "old" ? " rename-old-path" : ""}`}>{row.node.name}</span>
+                          {entry.renameCandidate && (
+                            <span className="compare-rename-inline">
+                              {renameRole === "new"
+                                ? ` (旧：${entry.renameCandidate})`
+                                : renameRole === "old"
+                                  ? ` (新：${entry.renameCandidate})`
+                                  : ` (${entry.renameCandidate})`}
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="compare-path compare-main-path" title={entry.path}>
+                          <span className={renameRole === "new" ? "rename-new-path" : renameRole === "old" ? "rename-old-path" : undefined}>{entry.path}</span>
+                          {entry.renameCandidate && (
+                            <span className="compare-rename-inline">
+                              {renameRole === "new"
+                                ? ` (旧：${entry.renameCandidate})`
+                                : renameRole === "old"
+                                  ? ` (新：${entry.renameCandidate})`
+                                  : ` (${entry.renameCandidate})`}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {currentTask && (
+                        <div className="compare-inline-progress">
+                          <span className={`badge tone-${bidiffTaskTone(currentTask.status)}`}>{bidiffTaskLabel(currentTask.status)}</span>
+                          <ProgressBar percent={bidiffTaskPercent(currentTask.status)} tone={bidiffTaskTone(currentTask.status)} />
+                        </div>
+                      )}
+                      {!entry.canApplyLeftToRight && entry.LeftToRightReason && (
+                        <div className="helper-line">采用左侧受限：{entry.LeftToRightReason}</div>
+                      )}
+                      {!entry.canApplyRightToLeft && entry.RightToLeftReason && (
+                        <div className="helper-line">采用右侧受限：{entry.RightToLeftReason}</div>
+                      )}
+                    </div>
+                  </td>
+                  <td>
+                    <BiDiffTimeCell file={entry.right} missingLabel="不存在" dateMode={timeMode} />
+                  </td>
+                  <td>
+                    <BiDiffSizeCell file={entry.right} missingLabel="不存在" />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </ResizableTable>
+
+        {entries.length === 0 && !props.bidiffBusy && <div className="compare-empty">当前筛选条件下没有差异项。</div>}
+      </div>
+
+      <div className="review-modal-sidebar">
+        <div className="review-sidebar-card">
+          <div className="section-title">目标设备</div>
+          <select value={props.selectedDeviceId} onChange={(event) => props.onSelectDevice(event.target.value)} style={{ width: "100%", marginTop: 6 }}>
+            {props.devices.map((device) => (
+              <option key={device.deviceID} value={device.deviceID}>
+                {deviceName(device)}
+              </option>
+            ))}
+          </select>
+          <div className="review-target-status">
+            <span className={`badge tone-${props.bidiff?.rightConnected ? "success" : "warning"}`}>{props.bidiff?.rightConnected ? "已连接" : "离线"}</span>
+            <span className={`badge tone-${props.remoteCompletion?.remoteState === "syncing" ? "warning" : "muted"}`}>{remoteStateLabel(props.remoteCompletion?.remoteState)}</span>
+            <span className="helper-line">右侧完成度 {props.remoteCompletion?.completion ?? 0}% · 待同步 {props.remoteCompletion?.needItems ?? 0} 项</span>
+            <ProgressBar percent={completionPercent(props.remoteCompletion)} tone={props.bidiff?.rightConnected ? "success" : "muted"} label="右侧进度" />
+          </div>
+        </div>
+
+        <div className="review-sidebar-card">
+          <div className="section-title">正在处理</div>
+          {props.activeTasks.length === 0 ? (
+            <div className="empty-mini">当前没有正在处理的裁决条目。</div>
+          ) : (
+            <div className="task-list">
+              {props.activeTasks.slice(0, 8).map((task) => (
+                <div key={task.key} className={`task-item tone-${bidiffTaskTone(task.status)}`}>
+                  <div className="task-item-head">
+                    <span className={`badge tone-${bidiffTaskTone(task.status)}`}>{bidiffTaskLabel(task.status)}</span>
+                    <span className="task-item-direction">{task.direction === "left-to-right" ? "左→右" : "右→左"}</span>
+                  </div>
+                  <div className="task-item-path">{task.path}</div>
+                  <ProgressBar percent={bidiffTaskPercent(task.status)} tone={bidiffTaskTone(task.status)} label="处理阶段" />
+                  {task.error && <div className="helper-line tone-danger">{task.error}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="review-actions">
+          <button className="ghost-button" onClick={props.onRefresh} disabled={props.bidiffBusy} style={{ width: "100%" }}>
+            {props.bidiffBusy ? "刷新中..." : props.scanBusy ? "扫描本地并刷新..." : "刷新全部差异"}
+          </button>
+          <button
+            className="ghost-button"
+            onClick={() => {
+              const next: Record<string, boolean> = {};
+              for (const entry of entries) {
+                if (entry.canApplyLeftToRight || entry.canApplyRightToLeft) {
+                  next[entry.path] = true;
+                }
+              }
+              props.onBidiffSelectionChange(next);
+            }}
+            disabled={!entries.some((entry) => entry.canApplyLeftToRight || entry.canApplyRightToLeft)}
+            style={{ width: "100%" }}
+          >
+            选中当前筛选结果
+          </button>
+          <button
+            className="ghost-button"
+            onClick={() => props.onBidiffSelectionChange({})}
+            disabled={!hasSelection}
+            style={{ width: "100%" }}
+          >
+            清空选择
+          </button>
+          <button
+            className="primary-button"
+            onClick={props.onApplyLeftToRight}
+            disabled={selectedLeftToRight === 0}
+            style={{ width: "100%" }}
+            title="把当前设备状态推到右侧"
+          >
+            采用左侧（已选 {selectedLeftToRight}）
+          </button>
+          <button
+            className="primary-button secondary-fill"
+            onClick={props.onApplyRightToLeft}
+            disabled={selectedRightToLeft === 0}
+            style={{ width: "100%" }}
+            title="把右侧状态应用到当前设备"
+          >
+            采用右侧（已选 {selectedRightToLeft}）
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PublishReviewPanel(props: {
   folder: FolderConfig;
   publish: PendingPublishResult | null;
@@ -2133,7 +3536,7 @@ function PublishReviewPanel(props: {
           <span>可发布 {entries.filter((entry) => entry.canPublish).length} 项</span>
           <span>已选 {selectedCount} 项</span>
         </div>
-        <div className="review-mobile-hint">手机建议横屏查看；表格可左右滑动，按住列头分隔线可调整列宽。</div>
+        <div className="review-mobile-hint">手机建议横屏查看；表格可左右滑动，按住列头分隔线可调整列宽。若 Android 内置 WebGUI 操作不顺，建议改用“在浏览器中打开”后再查看。</div>
 
         {props.publishMessage && <div className="inline-message info">{props.publishMessage}</div>}
         {props.publishError && <div className="inline-message danger">{props.publishError}</div>}

@@ -114,10 +114,13 @@ type Model interface {
 	LocalChangedFolderFiles(folder string, page, perpage int) ([]protocol.FileInfo, error)
 	PendingPublishFolderFiles(folder string, opts PendingPublishOptions) (PendingPublishResult, error)
 	CompareFolderFiles(folder string, device protocol.DeviceID, opts CompareOptions) (CompareResult, error)
+	BiDiffFolderFiles(folder string, device protocol.DeviceID, opts BiDiffOptions) (BiDiffResult, error)
 	FolderProgressBytesCompleted(folder string) int64
 	TriggerFolderPull(folder string) error
 	TriggerFolderPullSelected(folder string, files []string) error
 	PublishFolderSelected(folder string, files []string) error
+	PromoteFolderSelected(folder string, device protocol.DeviceID, files []string) error
+	ApplyBiDiffSelection(folder string, device protocol.DeviceID, direction string, files []string) error
 
 	CurrentFolderFile(folder string, file string) (protocol.FileInfo, bool, error)
 	CurrentGlobalFile(folder string, file string) (protocol.FileInfo, bool, error)

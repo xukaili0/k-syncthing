@@ -141,6 +141,31 @@ export type CompareResult = {
   manualSync: boolean;
 };
 
+export type BiDiffEntry = {
+  path: string;
+  status: string;
+  renameCandidate?: string;
+  canApplyLeftToRight: boolean;
+  canApplyRightToLeft: boolean;
+  leftToRightReason?: string;
+  rightToLeftReason?: string;
+  left?: JsonFileInfo;
+  right?: JsonFileInfo;
+};
+
+export type BiDiffResult = {
+  entries: BiDiffEntry[];
+  page: number;
+  perpage: number;
+  total: number;
+  rightConnected: boolean;
+  folderCanReceive: boolean;
+  folderCanPublish: boolean;
+  manualSync: boolean;
+  manualPublish: boolean;
+  rightDeviceID: string;
+};
+
 export type PendingPublishEntry = {
   path: string;
   action: string;
@@ -320,6 +345,30 @@ export async function triggerSystemAction(action: "restart" | "shutdown"): Promi
     credentials: "same-origin",
     headers: buildHeaders(true),
     body: JSON.stringify({}),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+}
+
+export async function triggerFolderScan(folder: string, subs?: string[], next?: number): Promise<void> {
+  const params = new URLSearchParams();
+  params.set("folder", folder);
+  if (subs) {
+    for (const sub of subs) {
+      params.append("sub", sub);
+    }
+  }
+  if (typeof next === "number" && Number.isFinite(next)) {
+    params.set("next", String(next));
+  }
+
+  const response = await fetch(`/rest/db/scan?${params.toString()}`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: buildHeaders(false),
   });
 
   if (!response.ok) {
