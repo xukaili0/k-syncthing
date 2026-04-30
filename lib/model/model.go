@@ -113,14 +113,17 @@ type Model interface {
 	RemoteNeedFolderFiles(folder string, device protocol.DeviceID, page, perpage int) ([]protocol.FileInfo, error)
 	LocalChangedFolderFiles(folder string, page, perpage int) ([]protocol.FileInfo, error)
 	PendingPublishFolderFiles(folder string, opts PendingPublishOptions) (PendingPublishResult, error)
+	PreviewIndexFolderFiles(folder string, device protocol.DeviceID, opts PreviewIndexOptions) (PreviewIndexResult, error)
 	CompareFolderFiles(folder string, device protocol.DeviceID, opts CompareOptions) (CompareResult, error)
 	BiDiffFolderFiles(folder string, device protocol.DeviceID, opts BiDiffOptions) (BiDiffResult, error)
+	PeerDiffFolderFiles(folder string, device protocol.DeviceID, opts BiDiffOptions) (BiDiffResult, error)
 	FolderProgressBytesCompleted(folder string) int64
 	TriggerFolderPull(folder string) error
 	TriggerFolderPullSelected(folder string, files []string) error
 	PublishFolderSelected(folder string, files []string) error
 	PromoteFolderSelected(folder string, device protocol.DeviceID, files []string) error
 	ApplyBiDiffSelection(folder string, device protocol.DeviceID, direction string, files []string) error
+	ApplyPeerDiffSelection(folder string, device protocol.DeviceID, direction string, files []string) error
 
 	CurrentFolderFile(folder string, file string) (protocol.FileInfo, bool, error)
 	CurrentGlobalFile(folder string, file string) (protocol.FileInfo, bool, error)
@@ -186,6 +189,8 @@ type model struct {
 	helloMessages                  map[protocol.DeviceID]protocol.Hello
 	deviceDownloads                map[protocol.DeviceID]*deviceDownloadState
 	remoteFolderStates             map[protocol.DeviceID]map[string]remoteFolderState // deviceID -> folders
+	previewIndexes                 map[protocol.DeviceID]map[string]previewIndexSnapshot
+	peerApplyResults               map[protocol.DeviceID]map[string]map[string]PeerApplyResultEntry
 	indexHandlers                  *serviceMap[protocol.DeviceID, *indexHandlerRegistry]
 
 	// for testing only
@@ -262,6 +267,8 @@ func NewModel(cfg config.Wrapper, id protocol.DeviceID, sdb db.DB, protectedFile
 		helloMessages:                  make(map[protocol.DeviceID]protocol.Hello),
 		deviceDownloads:                make(map[protocol.DeviceID]*deviceDownloadState),
 		remoteFolderStates:             make(map[protocol.DeviceID]map[string]remoteFolderState),
+		previewIndexes:                 make(map[protocol.DeviceID]map[string]previewIndexSnapshot),
+		peerApplyResults:               make(map[protocol.DeviceID]map[string]map[string]PeerApplyResultEntry),
 		indexHandlers:                  newServiceMap[protocol.DeviceID, *indexHandlerRegistry](evLogger),
 	}
 	for devID, cfg := range cfg.Devices() {
@@ -271,6 +278,7 @@ func NewModel(cfg config.Wrapper, id protocol.DeviceID, sdb db.DB, protectedFile
 	m.Add(m.folderRunners)
 	m.Add(m.progressEmitter)
 	m.Add(m.indexHandlers)
+	m.Add(svcutil.AsService(m.servePreviewIndexes, fmt.Sprintf("%s/previewIndexes", m)))
 	m.Add(svcutil.AsService(m.serve, m.String()))
 
 	return m
@@ -1229,6 +1237,17 @@ func (m *model) handleIndex(conn protocol.Connection, folder string, fs []protoc
 
 	deviceID := conn.DeviceID()
 	l.Debugf("%v (in): %s / %q: %d files", op, deviceID, folder, len(fs))
+
+	if _, ok := parsePeerApplyFolderID(folder); ok {
+		return m.handlePeerApplyIndex(conn, folder, fs, update, prevSequence, lastSequence)
+	}
+	if _, ok := parsePeerApplyResultFolderID(folder); ok {
+		return m.handlePeerApplyResultIndex(conn, folder, fs, update, prevSequence, lastSequence)
+	}
+
+	if _, ok := parsePreviewFolderID(folder); ok {
+		return m.handlePreviewIndex(conn, folder, fs, update, prevSequence, lastSequence)
+	}
 
 	if cfg, ok := m.cfg.Folder(folder); !ok || !cfg.SharedWith(deviceID) {
 		slog.Warn(`Operation for unexpected folder ID; ensure that the folder exists and that this device is selected under "Share With" in the folder configuration.`, slog.String("operation", op), cfg.LogAttr(), deviceID.LogAttr())

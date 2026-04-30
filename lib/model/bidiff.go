@@ -8,7 +8,10 @@ package model
 
 import (
 	"slices"
+	"strings"
+	"time"
 
+	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/events"
 	stfs "github.com/syncthing/syncthing/lib/fs"
@@ -28,30 +31,38 @@ type BiDiffOptions struct {
 }
 
 type BiDiffEntry struct {
-	Path                 string
-	Status               string
-	Left                 *protocol.FileInfo
-	Right                *protocol.FileInfo
-	RenameCandidate      string
-	CanApplyLeftToRight  bool
-	CanApplyRightToLeft  bool
-	LeftToRightReason    string
-	RightToLeftReason    string
+	Path                string
+	Status              string
+	Left                *protocol.FileInfo
+	Right               *protocol.FileInfo
+	RenameCandidate     string
+	CanApplyLeftToRight bool
+	CanApplyRightToLeft bool
+	LeftToRightReason   string
+	RightToLeftReason   string
 }
 
 type BiDiffResult struct {
-	Entries           []BiDiffEntry
-	Page              int
-	PerPage           int
-	Total             int
-	RightConnected    bool
-	FolderCanReceive  bool
-	FolderCanPublish  bool
-	ManualSync        bool
-	ManualPublish     bool
-	RightDeviceID     protocol.DeviceID
-	RequestedView     string
-	RequestedPrefix   string
+	Entries                []BiDiffEntry
+	Page                   int
+	PerPage                int
+	Total                  int
+	RightConnected         bool
+	FolderCanReceive       bool
+	FolderCanPublish       bool
+	ManualSync             bool
+	ManualPublish          bool
+	LocalPendingItems      int
+	PreviewMode            string
+	LocalSequence          int64
+	RightSequence          int64
+	RemotePreviewAvailable bool
+	RemotePreviewSequence  int64
+	RemotePreviewUpdated   time.Time
+	PeerApplyResults       []PeerApplyResultEntry
+	RightDeviceID          protocol.DeviceID
+	RequestedView          string
+	RequestedPrefix        string
 }
 
 func (m *model) BiDiffFolderFiles(folder string, device protocol.DeviceID, opts BiDiffOptions) (BiDiffResult, error) {
@@ -95,6 +106,10 @@ func (m *model) BiDiffFolderFiles(folder string, device protocol.DeviceID, opts 
 		pageEntries = append(pageEntries, m.toBiDiffEntry(folder, cfg, entry))
 	}
 
+	localSeq, _ := m.Sequence(folder, protocol.LocalDeviceID)
+	rightSeq, _ := m.Sequence(folder, device)
+	applyResults := m.peerApplyResultsFor(folder, device)
+
 	return BiDiffResult{
 		Entries:          pageEntries,
 		Page:             opts.Page,
@@ -105,9 +120,97 @@ func (m *model) BiDiffFolderFiles(folder string, device protocol.DeviceID, opts 
 		FolderCanPublish: folderTypeCanPublish(cfg.Type),
 		ManualSync:       cfg.ManualSync,
 		ManualPublish:    cfg.ManualPublish,
+		PreviewMode:      "announced-index",
+		LocalSequence:    localSeq,
+		RightSequence:    rightSeq,
+		PeerApplyResults: applyResults,
 		RightDeviceID:    device,
 		RequestedView:    opts.View,
 		RequestedPrefix:  opts.Prefix,
+	}, nil
+}
+
+func (m *model) PeerDiffFolderFiles(folder string, device protocol.DeviceID, opts BiDiffOptions) (BiDiffResult, error) {
+	m.mut.RLock()
+	cfg, ok := m.folderCfgs[folder]
+	m.mut.RUnlock()
+
+	if !ok {
+		return BiDiffResult{}, ErrFolderMissing
+	}
+	if !folderSharedWithDevice(cfg, device) {
+		return BiDiffResult{}, errDeviceUnknown
+	}
+
+	opts = BiDiffOptions(normalizeCompareOptions(CompareOptions(opts)))
+
+	leftFiles, err := m.collectCompareFiles(folder, protocol.LocalDeviceID, opts.Prefix)
+	if err != nil {
+		return BiDiffResult{}, err
+	}
+	rightFiles, err := m.collectCompareFiles(folder, device, opts.Prefix)
+	if err != nil {
+		return BiDiffResult{}, err
+	}
+	previewMode := "announced-index-plus-local"
+	if snapshot, ok := m.previewSnapshot(folder, device); ok {
+		for path, fi := range snapshot.Files {
+			if opts.Prefix != "" && !strings.HasPrefix(path, opts.Prefix) {
+				continue
+			}
+			rightFiles[path] = fi
+		}
+		previewMode = "remote-preview-index-plus-local"
+	}
+
+	compareEntries := buildCompareEntries(leftFiles, rightFiles, cfg.ModTimeWindow())
+	compareEntries = filterCompareEntries(compareEntries, opts.View)
+	total := len(compareEntries)
+
+	start := (opts.Page - 1) * opts.PerPage
+	if start > total {
+		start = total
+	}
+	end := start + opts.PerPage
+	if end > total {
+		end = total
+	}
+
+	pageEntries := make([]BiDiffEntry, 0, end-start)
+	for _, entry := range compareEntries[start:end] {
+		pageEntries = append(pageEntries, m.toPeerDiffEntry(folder, cfg, entry))
+	}
+
+	pendingCounts, err := m.ManualPublishPendingSize(folder)
+	if err != nil {
+		pendingCounts = db.Counts{}
+	}
+	localSeq, _ := m.Sequence(folder, protocol.LocalDeviceID)
+	rightSeq, _ := m.Sequence(folder, device)
+	previewSnapshot, hasPreview := m.previewSnapshot(folder, device)
+	applyResults := m.peerApplyResultsFor(folder, device)
+
+	return BiDiffResult{
+		Entries:                pageEntries,
+		Page:                   opts.Page,
+		PerPage:                opts.PerPage,
+		Total:                  total,
+		RightConnected:         m.ConnectedTo(device),
+		FolderCanReceive:       folderTypeCanReceive(cfg.Type),
+		FolderCanPublish:       folderTypeCanPublish(cfg.Type),
+		ManualSync:             cfg.ManualSync,
+		ManualPublish:          cfg.ManualPublish,
+		LocalPendingItems:      pendingCounts.TotalItems(),
+		PreviewMode:            previewMode,
+		LocalSequence:          localSeq,
+		RightSequence:          rightSeq,
+		RemotePreviewAvailable: hasPreview,
+		RemotePreviewSequence:  previewSnapshot.Sequence,
+		RemotePreviewUpdated:   previewSnapshot.Updated,
+		PeerApplyResults:       applyResults,
+		RightDeviceID:          device,
+		RequestedView:          opts.View,
+		RequestedPrefix:        opts.Prefix,
 	}, nil
 }
 
@@ -128,12 +231,39 @@ func (m *model) toBiDiffEntry(folder string, cfg config.FolderConfiguration, ent
 	}
 }
 
+func (m *model) toPeerDiffEntry(folder string, cfg config.FolderConfiguration, entry CompareEntry) BiDiffEntry {
+	canLeftToRight, leftReason := peerdiffEntryCanApplyLeftToRight(cfg, entry)
+	canRightToLeft, rightReason := m.peerdiffEntryCanApplyRightToLeft(folder, cfg, entry)
+
+	return BiDiffEntry{
+		Path:                entry.Path,
+		Status:              entry.Status,
+		Left:                entry.Local,
+		Right:               entry.Remote,
+		RenameCandidate:     entry.RenameCandidate,
+		CanApplyLeftToRight: canLeftToRight,
+		CanApplyRightToLeft: canRightToLeft,
+		LeftToRightReason:   leftReason,
+		RightToLeftReason:   rightReason,
+	}
+}
+
 func bidiffEntryCanApplyLeftToRight(cfg config.FolderConfiguration, entry CompareEntry) (bool, string) {
 	if !folderTypeCanPublish(cfg.Type) {
 		return false, "当前文件夹不能向右侧发布"
 	}
 	if !cfg.ManualPublish {
 		return false, "要保证只裁决所选文件，请先开启手动审核发布"
+	}
+	if entry.Status == "same" {
+		return false, "两侧已经一致"
+	}
+	return true, ""
+}
+
+func peerdiffEntryCanApplyLeftToRight(cfg config.FolderConfiguration, entry CompareEntry) (bool, string) {
+	if !folderTypeCanPublish(cfg.Type) {
+		return false, "当前文件夹不能向右侧应用左侧状态"
 	}
 	if entry.Status == "same" {
 		return false, "两侧已经一致"
@@ -171,6 +301,33 @@ func (m *model) bidiffEntryCanApplyRightToLeft(folder string, cfg config.FolderC
 	}
 }
 
+func (m *model) peerdiffEntryCanApplyRightToLeft(folder string, cfg config.FolderConfiguration, entry CompareEntry) (bool, string) {
+	if !folderTypeCanReceive(cfg.Type) {
+		return false, "当前文件夹不能把右侧状态应用到左侧"
+	}
+	if entry.Status == "same" {
+		return false, "两侧已经一致"
+	}
+	if m.compareEntryCanPrioritize(folder, cfg, entry) {
+		return true, ""
+	}
+
+	switch entry.Status {
+	case "only-remote":
+		return true, ""
+	case "deleted-local":
+		return true, ""
+	case "deleted-remote":
+		return true, ""
+	case "modified", "type-changed", "conflict":
+		return true, ""
+	case "only-local":
+		return true, ""
+	default:
+		return false, "当前差异还不能直接执行右侧到左侧"
+	}
+}
+
 func (m *model) ApplyBiDiffSelection(folder string, device protocol.DeviceID, direction string, files []string) error {
 	switch direction {
 	case BiDiffDirectionLeftToRight:
@@ -182,7 +339,45 @@ func (m *model) ApplyBiDiffSelection(folder string, device protocol.DeviceID, di
 	}
 }
 
+func (m *model) ApplyPeerDiffSelection(folder string, device protocol.DeviceID, direction string, files []string) error {
+	switch direction {
+	case BiDiffDirectionLeftToRight:
+		return m.sendPeerApply(folder, device, files)
+	case BiDiffDirectionRightToLeft:
+		err := m.applyPeerRemoteSideSelected(folder, device, files)
+		results := make([]PeerApplyResultEntry, 0, len(files))
+		now := time.Now()
+		for _, path := range files {
+			status := "success"
+			message := ""
+			if err != nil {
+				status = "failed"
+				message = err.Error()
+			}
+			results = append(results, PeerApplyResultEntry{
+				Path:      path,
+				Direction: BiDiffDirectionRightToLeft,
+				Status:    status,
+				Message:   message,
+				Updated:   now,
+			})
+		}
+		m.recordPeerApplyResults(device, folder, results)
+		return err
+	default:
+		return errGeneric{"invalid peerdiff direction"}
+	}
+}
+
 func (m *model) applyRemoteSideSelected(folder string, device protocol.DeviceID, files []string) error {
+	return m.applyRemoteSideSelectedWithPolicy(folder, device, files, m.bidiffEntryCanApplyRightToLeft, false)
+}
+
+func (m *model) applyPeerRemoteSideSelected(folder string, device protocol.DeviceID, files []string) error {
+	return m.applyRemoteSideSelectedWithPolicy(folder, device, files, m.peerdiffEntryCanApplyRightToLeft, true)
+}
+
+func (m *model) applyRemoteSideSelectedWithPolicy(folder string, device protocol.DeviceID, files []string, canApplyFn func(string, config.FolderConfiguration, CompareEntry) (bool, string), usePreview bool) error {
 	m.mut.RLock()
 	cfg, cfgOK := m.folderCfgs[folder]
 	m.mut.RUnlock()
@@ -199,6 +394,7 @@ func (m *model) applyRemoteSideSelected(folder string, device protocol.DeviceID,
 	if !folderTypeCanReceive(cfg.Type) {
 		return ErrFolderNotRunning
 	}
+	previewSnapshot, hasPreview := m.previewSnapshot(folder, device)
 
 	selected := make([]string, 0, len(files))
 	updates := make([]protocol.FileInfo, 0, len(files))
@@ -216,9 +412,19 @@ func (m *model) applyRemoteSideSelected(folder string, device protocol.DeviceID,
 		if err != nil {
 			return err
 		}
-		remote, remoteOK, err := m.sdb.GetDeviceFile(folder, device, file)
-		if err != nil {
-			return err
+		var remote protocol.FileInfo
+		var remoteOK bool
+		if usePreview && hasPreview {
+			if previewRemote, ok := previewSnapshot.Files[file]; ok {
+				remote = previewRemote
+				remoteOK = true
+			}
+		}
+		if !remoteOK {
+			remote, remoteOK, err = m.sdb.GetDeviceFile(folder, device, file)
+			if err != nil {
+				return err
+			}
 		}
 		entry := CompareEntry{
 			Path:   file,
@@ -230,7 +436,7 @@ func (m *model) applyRemoteSideSelected(folder string, device protocol.DeviceID,
 		if remoteOK {
 			entry.Remote = cloneFileInfo(remote)
 		}
-		canApply, _ := m.bidiffEntryCanApplyRightToLeft(folder, cfg, entry)
+		canApply, _ := canApplyFn(folder, cfg, entry)
 		if !canApply {
 			continue
 		}

@@ -4103,12 +4103,54 @@ func (fake *Model) PendingPublishFolderFiles(arg1 string, arg2 model.PendingPubl
 	return model.PendingPublishResult{}, nil
 }
 
+func (fake *Model) PreviewIndexFolderFiles(arg1 string, arg2 protocol.DeviceID, arg3 model.PreviewIndexOptions) (model.PreviewIndexResult, error) {
+	fake.recordInvocation("PreviewIndexFolderFiles", []interface{}{arg1, arg2, arg3})
+	return model.PreviewIndexResult{}, nil
+}
+
+func (fake *Model) BiDiffFolderFiles(arg1 string, arg2 protocol.DeviceID, arg3 model.BiDiffOptions) (model.BiDiffResult, error) {
+	fake.recordInvocation("BiDiffFolderFiles", []interface{}{arg1, arg2, arg3})
+	return model.BiDiffResult{}, nil
+}
+
+func (fake *Model) PeerDiffFolderFiles(arg1 string, arg2 protocol.DeviceID, arg3 model.BiDiffOptions) (model.BiDiffResult, error) {
+	fake.recordInvocation("PeerDiffFolderFiles", []interface{}{arg1, arg2, arg3})
+	return model.BiDiffResult{}, nil
+}
+
 func (fake *Model) PublishFolderSelected(arg1 string, arg2 []string) error {
 	var copied []string
 	if arg2 != nil {
 		copied = append([]string(nil), arg2...)
 	}
 	fake.recordInvocation("PublishFolderSelected", []interface{}{arg1, copied})
+	return nil
+}
+
+func (fake *Model) PromoteFolderSelected(arg1 string, arg2 protocol.DeviceID, arg3 []string) error {
+	var copied []string
+	if arg3 != nil {
+		copied = append([]string(nil), arg3...)
+	}
+	fake.recordInvocation("PromoteFolderSelected", []interface{}{arg1, arg2, copied})
+	return nil
+}
+
+func (fake *Model) ApplyBiDiffSelection(arg1 string, arg2 protocol.DeviceID, arg3 string, arg4 []string) error {
+	var copied []string
+	if arg4 != nil {
+		copied = append([]string(nil), arg4...)
+	}
+	fake.recordInvocation("ApplyBiDiffSelection", []interface{}{arg1, arg2, arg3, copied})
+	return nil
+}
+
+func (fake *Model) ApplyPeerDiffSelection(arg1 string, arg2 protocol.DeviceID, arg3 string, arg4 []string) error {
+	var copied []string
+	if arg4 != nil {
+		copied = append([]string(nil), arg4...)
+	}
+	fake.recordInvocation("ApplyPeerDiffSelection", []interface{}{arg1, arg2, arg3, copied})
 	return nil
 }
 

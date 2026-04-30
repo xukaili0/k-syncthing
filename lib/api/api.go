@@ -258,9 +258,11 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/need", s.getDBNeed)                         // folder [perpage] [page]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/compare", s.getDBCompare)                   // device folder [perpage] [page] [prefix] [view]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/bidiff", s.getDBBiDiff)                     // device folder [perpage] [page] [prefix] [view]
+	restMux.HandlerFunc(http.MethodGet, "/rest/db/peerdiff", s.getDBPeerDiff)                 // device folder [perpage] [page] [prefix] [view]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/remoteneed", s.getDBRemoteNeed)             // device folder [perpage] [page]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/localchanged", s.getDBLocalChanged)         // folder [perpage] [page]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/pendingpublish", s.getDBPendingPublish)     // folder [perpage] [page] [prefix] [view]
+	restMux.HandlerFunc(http.MethodGet, "/rest/db/previewindex", s.getDBPreviewIndex)         // folder [device] [perpage] [page] [prefix]
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/status", s.getDBStatus)                     // folder
 	restMux.HandlerFunc(http.MethodGet, "/rest/db/browse", s.getDBBrowse)                     // folder [prefix] [dirsonly] [levels]
 	restMux.HandlerFunc(http.MethodGet, "/rest/folder/versions", s.getFolderVersions)         // folder
@@ -294,6 +296,7 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/pullselected", s.postDBPullSelected)          // folder <body>
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/publishselected", s.postDBPublishSelected)    // folder <body>
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/bidiffapply", s.postDBBiDiffApply)            // folder device <body>
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/peerdiffapply", s.postDBPeerDiffApply)        // folder device <body>
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/ignores", s.postDBIgnores)                    // folder
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/override", s.postDBOverride)                  // folder
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/revert", s.postDBRevert)                      // folder
@@ -965,6 +968,47 @@ func (s *service) getDBCompare(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *service) getDBPreviewIndex(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+
+	folder := qs.Get("folder")
+	device := qs.Get("device")
+	var deviceID protocol.DeviceID
+	var err error
+	if device != "" {
+		deviceID, err = protocol.DeviceIDFromString(device)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	page, perpage := getPagingParams(qs)
+	result, err := s.model.PreviewIndexFolderFiles(folder, deviceID, model.PreviewIndexOptions{
+		Page:    page,
+		PerPage: perpage,
+		Prefix:  qs.Get("prefix"),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	sendJSON(w, map[string]interface{}{
+		"entries":           toJSONPreviewIndexEntrySlice(result.Entries),
+		"page":              result.Page,
+		"perpage":           result.PerPage,
+		"total":             result.Total,
+		"sequence":          result.Sequence,
+		"folderCanPublish":  result.FolderCanPublish,
+		"manualPublish":     result.ManualPublish,
+		"device":            result.PreviewDeviceID.String(),
+		"prefix":            result.RequestedPrefix,
+		"previewTransport":  result.PreviewTransport,
+		"previewVisibility": result.PreviewVisibility,
+	})
+}
+
 func (s *service) getDBBiDiff(w http.ResponseWriter, r *http.Request) {
 	qs := r.URL.Query()
 
@@ -990,19 +1034,98 @@ func (s *service) getDBBiDiff(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendJSON(w, map[string]interface{}{
-		"entries":          toJSONBiDiffEntrySlice(result.Entries),
-		"page":             result.Page,
-		"perpage":          result.PerPage,
-		"total":            result.Total,
-		"rightConnected":   result.RightConnected,
-		"folderCanReceive": result.FolderCanReceive,
-		"folderCanPublish": result.FolderCanPublish,
-		"manualSync":       result.ManualSync,
-		"manualPublish":    result.ManualPublish,
-		"rightDeviceID":    result.RightDeviceID.String(),
-		"view":             result.RequestedView,
-		"prefix":           result.RequestedPrefix,
+		"entries":                toJSONBiDiffEntrySlice(result.Entries),
+		"page":                   result.Page,
+		"perpage":                result.PerPage,
+		"total":                  result.Total,
+		"rightConnected":         result.RightConnected,
+		"folderCanReceive":       result.FolderCanReceive,
+		"folderCanPublish":       result.FolderCanPublish,
+		"manualSync":             result.ManualSync,
+		"manualPublish":          result.ManualPublish,
+		"localPendingItems":      result.LocalPendingItems,
+		"previewMode":            result.PreviewMode,
+		"localSequence":          result.LocalSequence,
+		"rightSequence":          result.RightSequence,
+		"remotePreviewAvailable": result.RemotePreviewAvailable,
+		"remotePreviewSequence":  result.RemotePreviewSequence,
+		"remotePreviewUpdated":   result.RemotePreviewUpdated,
+		"peerApplyResults":       toJSONPeerApplyResultEntrySlice(result.PeerApplyResults),
+		"rightDeviceID":          result.RightDeviceID.String(),
+		"view":                   result.RequestedView,
+		"prefix":                 result.RequestedPrefix,
 	})
+}
+
+func (s *service) getDBPeerDiff(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+
+	folder := qs.Get("folder")
+	device := qs.Get("device")
+	deviceID, err := protocol.DeviceIDFromString(device)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	page, perpage := getPagingParams(qs)
+
+	result, err := s.model.PeerDiffFolderFiles(folder, deviceID, model.BiDiffOptions{
+		Page:    page,
+		PerPage: perpage,
+		Prefix:  qs.Get("prefix"),
+		View:    qs.Get("view"),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	sendJSON(w, map[string]interface{}{
+		"entries":                toJSONBiDiffEntrySlice(result.Entries),
+		"page":                   result.Page,
+		"perpage":                result.PerPage,
+		"total":                  result.Total,
+		"rightConnected":         result.RightConnected,
+		"folderCanReceive":       result.FolderCanReceive,
+		"folderCanPublish":       result.FolderCanPublish,
+		"manualSync":             result.ManualSync,
+		"manualPublish":          result.ManualPublish,
+		"localPendingItems":      result.LocalPendingItems,
+		"previewMode":            result.PreviewMode,
+		"localSequence":          result.LocalSequence,
+		"rightSequence":          result.RightSequence,
+		"remotePreviewAvailable": result.RemotePreviewAvailable,
+		"remotePreviewSequence":  result.RemotePreviewSequence,
+		"remotePreviewUpdated":   result.RemotePreviewUpdated,
+		"peerApplyResults":       toJSONPeerApplyResultEntrySlice(result.PeerApplyResults),
+		"rightDeviceID":          result.RightDeviceID.String(),
+		"view":                   result.RequestedView,
+		"prefix":                 result.RequestedPrefix,
+		"workbench":              "peer",
+	})
+}
+
+type jsonPeerApplyResultEntry struct {
+	Path      string    `json:"path"`
+	Direction string    `json:"direction"`
+	Status    string    `json:"status"`
+	Message   string    `json:"message,omitempty"`
+	Updated   time.Time `json:"updated"`
+}
+
+func toJSONPeerApplyResultEntrySlice(entries []model.PeerApplyResultEntry) []jsonPeerApplyResultEntry {
+	out := make([]jsonPeerApplyResultEntry, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, jsonPeerApplyResultEntry{
+			Path:      entry.Path,
+			Direction: entry.Direction,
+			Status:    entry.Status,
+			Message:   entry.Message,
+			Updated:   entry.Updated,
+		})
+	}
+	return out
 }
 
 func (s *service) postDBPublishSelected(w http.ResponseWriter, r *http.Request) {
@@ -1753,6 +1876,35 @@ func (s *service) postDBBiDiffApply(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, map[string]any{"ok": true})
 }
 
+func (s *service) postDBPeerDiffApply(w http.ResponseWriter, r *http.Request) {
+	folder := r.URL.Query().Get("folder")
+	device := r.URL.Query().Get("device")
+	deviceID, err := protocol.DeviceIDFromString(device)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var body struct {
+		Direction string   `json:"direction"`
+		Files     []string `json:"files"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := s.model.ApplyPeerDiffSelection(folder, deviceID, body.Direction, body.Files); err != nil {
+		status := http.StatusInternalServerError
+		if isFolderNotFound(err) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	sendJSON(w, map[string]any{"ok": true})
+}
+
 func (s *service) postDBPullSelected(w http.ResponseWriter, r *http.Request) {
 	folder := r.URL.Query().Get("folder")
 
@@ -1994,12 +2146,21 @@ func toJSONPendingPublishEntrySlice(entries []model.PendingPublishEntry) []jsonP
 	return res
 }
 
+func toJSONPreviewIndexEntrySlice(entries []model.PreviewIndexEntry) []jsonPreviewIndexEntry {
+	res := make([]jsonPreviewIndexEntry, len(entries))
+	for i, entry := range entries {
+		res[i] = jsonPreviewIndexEntry(entry)
+	}
+	return res
+}
+
 // Type wrappers for nice JSON serialization
 
 type jsonFileInfo protocol.FileInfo
 type jsonCompareEntry model.CompareEntry
 type jsonBiDiffEntry model.BiDiffEntry
 type jsonPendingPublishEntry model.PendingPublishEntry
+type jsonPreviewIndexEntry model.PreviewIndexEntry
 
 func (f jsonFileInfo) MarshalJSON() ([]byte, error) {
 	m := fileIntfJSONMap(protocol.FileInfo(f))
@@ -2057,6 +2218,19 @@ func (e jsonPendingPublishEntry) MarshalJSON() ([]byte, error) {
 	}
 	if entry.Global != nil {
 		out["global"] = jsonFileInfo(*entry.Global)
+	}
+	return json.Marshal(out)
+}
+
+func (e jsonPreviewIndexEntry) MarshalJSON() ([]byte, error) {
+	entry := model.PreviewIndexEntry(e)
+	out := map[string]interface{}{
+		"path":            entry.Path,
+		"action":          entry.Action,
+		"renameCandidate": entry.RenameCandidate,
+	}
+	if entry.File != nil {
+		out["file"] = jsonFileInfo(*entry.File)
 	}
 	return json.Marshal(out)
 }

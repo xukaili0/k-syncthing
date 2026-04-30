@@ -1205,6 +1205,16 @@ function App() {
   const [bidiffTasks, setBiDiffTasks] = useState<Record<string, BiDiffTask>>({});
   const [bidiffAutoRefreshPaused, setBidiffAutoRefreshPaused] = useState(false);
 
+  const [peerDiff, setPeerDiff] = useState<BiDiffResult | null>(null);
+  const [peerDiffBusy, setPeerDiffBusy] = useState(false);
+  const [peerDiffError, setPeerDiffError] = useState("");
+  const [peerDiffView, setPeerDiffView] = useState("different");
+  const [peerDiffPrefix, setPeerDiffPrefix] = useState("");
+  const [peerDiffSelection, setPeerDiffSelection] = useState<Record<string, boolean>>({});
+  const [peerDiffMessage, setPeerDiffMessage] = useState("");
+  const [peerDiffTasks, setPeerDiffTasks] = useState<Record<string, BiDiffTask>>({});
+  const [peerDiffAutoRefreshPaused, setPeerDiffAutoRefreshPaused] = useState(false);
+
   const [publish, setPublish] = useState<PendingPublishResult | null>(null);
   const [publishBusy, setPublishBusy] = useState(false);
   const [publishError, setPublishError] = useState("");
@@ -1212,7 +1222,7 @@ function App() {
   const [publishPrefix, setPublishPrefix] = useState("");
   const [publishSelection, setPublishSelection] = useState<Record<string, boolean>>({});
   const [publishMessage, setPublishMessage] = useState("");
-  const [panelScanBusy, setPanelScanBusy] = useState<"" | "compare" | "bidiff" | "publish">("");
+  const [panelScanBusy, setPanelScanBusy] = useState<"" | "compare" | "bidiff" | "peerdiff" | "publish">("");
 
   const [folderEditorOpen, setFolderEditorOpen] = useState(false);
   const [folderDraft, setFolderDraft] = useState<FolderConfig | null>(null);
@@ -1233,6 +1243,7 @@ function App() {
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [receiveModalOpen, setReceiveModalOpen] = useState(false);
   const [bidiffModalOpen, setBiDiffModalOpen] = useState(false);
+  const [peerDiffModalOpen, setPeerDiffModalOpen] = useState(false);
   const [publishModalOpen, setPublishModalOpen] = useState(false);
   const [systemActionBusy, setSystemActionBusy] = useState<"" | "restart" | "shutdown">("");
   const [systemActionMessage, setSystemActionMessage] = useState("");
@@ -1428,6 +1439,50 @@ function App() {
     await loadBiDiff();
   }, [loadBiDiff, selectedFolder]);
 
+  const loadPeerDiff = useCallback(async () => {
+    if (!selectedFolder || !selectedDeviceId) {
+      setPeerDiff(null);
+      return;
+    }
+
+    setPeerDiffBusy(true);
+    setPeerDiffError("");
+    try {
+      const data = await getJSON<BiDiffResult>(
+        `/rest/db/peerdiff?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(peerDiffView)}&prefix=${encodeURIComponent(peerDiffPrefix)}&page=1&perpage=500`,
+      );
+      setPeerDiff(data);
+      setPeerDiffSelection((previous) => {
+        const next: Record<string, boolean> = {};
+        for (const entry of data.entries) {
+          if (previous[entry.path]) {
+            next[entry.path] = true;
+          }
+        }
+        return next;
+      });
+    } catch (error) {
+      setPeerDiffError(error instanceof Error ? error.message : "加载对等差异工作台失败");
+    } finally {
+      setPeerDiffBusy(false);
+    }
+  }, [peerDiffPrefix, peerDiffView, selectedDeviceId, selectedFolder]);
+
+  const refreshPeerDiff = useCallback(async (rescanLocal: boolean) => {
+    if (!selectedFolder) {
+      return;
+    }
+    if (rescanLocal) {
+      setPanelScanBusy("peerdiff");
+      try {
+        await triggerFolderScan(selectedFolder.id);
+      } finally {
+        setPanelScanBusy("");
+      }
+    }
+    await loadPeerDiff();
+  }, [loadPeerDiff, selectedFolder]);
+
   const loadPublish = useCallback(async () => {
     if (!selectedFolder) {
       setPublish(null);
@@ -1548,6 +1603,20 @@ function App() {
   }, [bidiffAutoRefreshPaused, bidiffModalOpen, panelRefreshSeconds, refreshBiDiff, selectedDeviceId, selectedFolder]);
 
   useEffect(() => {
+    if (!peerDiffModalOpen || !selectedFolder || !selectedDeviceId) {
+      return;
+    }
+    void refreshPeerDiff(true);
+    if (peerDiffAutoRefreshPaused) {
+      return;
+    }
+    const handle = window.setInterval(() => {
+      void refreshPeerDiff(!selectedFolder.fsWatcherEnabled);
+    }, panelRefreshSeconds * 1000);
+    return () => window.clearInterval(handle);
+  }, [panelRefreshSeconds, peerDiffAutoRefreshPaused, peerDiffModalOpen, refreshPeerDiff, selectedDeviceId, selectedFolder]);
+
+  useEffect(() => {
     if (!selectedFolder || !selectedDeviceId) {
       return;
     }
@@ -1585,6 +1654,63 @@ function App() {
       return changed ? next : previous;
     });
   }, [bidiff, bidiffBusy, completions, selectedDeviceId, selectedFolder]);
+
+  useEffect(() => {
+    if (!selectedFolder || !selectedDeviceId) {
+      return;
+    }
+    setPeerDiffTasks((previous) => {
+      const next = { ...previous };
+      const entryMap = new Map((peerDiff?.entries ?? []).map((entry) => [entry.path, entry]));
+      const resultMap = new Map(
+        (peerDiff?.peerApplyResults ?? []).map((result) => [`${result.direction}::${result.path}`, result]),
+      );
+      let changed = false;
+      for (const [key, task] of Object.entries(previous)) {
+        if (task.folderId !== selectedFolder.id || task.deviceId !== selectedDeviceId) {
+          continue;
+        }
+        if (task.status === "failed" || task.status === "completed") {
+          continue;
+        }
+        const result = resultMap.get(`${task.direction}::${task.path}`);
+        if (result) {
+          const resultUpdated = Date.parse(result.updated);
+          if (Number.isFinite(resultUpdated) && resultUpdated >= task.updatedAt - 1000) {
+            const nextStatus = result.status === "failed" ? "failed" : "completed";
+            next[key] = {
+              ...task,
+              status: nextStatus,
+              error: result.status === "failed" ? result.message || "远端显式应用失败" : undefined,
+              updatedAt: Date.now(),
+            };
+            changed = true;
+            continue;
+          }
+        }
+        const entry = entryMap.get(task.path);
+        const stillActionable =
+          task.direction === "left-to-right" ? entry?.canApplyLeftToRight : entry?.canApplyRightToLeft;
+        let nextStatus = task.status;
+        if (!entry || !stillActionable) {
+          nextStatus = "completed";
+        } else if (
+          completions[selectedDeviceId]?.[selectedFolder.id]?.remoteState === "syncing" ||
+          completions[selectedDeviceId]?.[selectedFolder.id]?.remoteState === "scanning" ||
+          peerDiffBusy
+        ) {
+          nextStatus = "processing";
+        } else if (task.status === "queued") {
+          nextStatus = "submitted";
+        }
+        if (nextStatus !== task.status) {
+          next[key] = { ...task, status: nextStatus, updatedAt: Date.now() };
+          changed = true;
+        }
+      }
+      return changed ? next : previous;
+    });
+  }, [completions, peerDiff, peerDiffBusy, selectedDeviceId, selectedFolder]);
 
   useEffect(() => {
     if (!publishModalOpen || !selectedFolder) {
@@ -1643,6 +1769,16 @@ function App() {
       .filter((task) => task.status !== "completed")
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }, [bidiffTasks, selectedDeviceId, selectedFolder]);
+
+  const activePeerDiffTasks = useMemo(() => {
+    if (!selectedFolder || !selectedDeviceId) {
+      return [];
+    }
+    return Object.values(peerDiffTasks)
+      .filter((task) => task.folderId === selectedFolder.id && task.deviceId === selectedDeviceId)
+      .filter((task) => task.status !== "completed")
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  }, [peerDiffTasks, selectedDeviceId, selectedFolder]);
 
   const publishVisibleEntries = useMemo(
     () => (publish?.entries ?? []).filter((entry) => entry.canPublish),
@@ -1761,6 +1897,66 @@ function App() {
         return next;
       });
       setBiDiffMessage(message);
+    }
+  };
+
+  const applyPeerDiffEntries = async (direction: "left-to-right" | "right-to-left", entries: BiDiffEntry[]) => {
+    if (!selectedFolder || !selectedDeviceId) {
+      return;
+    }
+    if (entries.length === 0) {
+      setPeerDiffMessage("当前没有可执行的已选条目。");
+      return;
+    }
+    const directionLabel = direction === "left-to-right" ? "采用左侧到右侧" : "采用右侧到左侧";
+    const summary = entries.length === 1 ? `\n\n${entries[0].path}` : `\n\n共 ${entries.length} 项`;
+    if (!window.confirm(`确认执行“${directionLabel}”？${summary}`)) {
+      return;
+    }
+    const now = Date.now();
+    setPeerDiffTasks((previous) => {
+      const next = { ...previous };
+      for (const entry of entries) {
+        const key = bidiffTaskKey(selectedFolder.id, selectedDeviceId, direction, entry.path);
+        next[key] = {
+          key,
+          folderId: selectedFolder.id,
+          deviceId: selectedDeviceId,
+          path: entry.path,
+          direction,
+          status: "submitted",
+          updatedAt: now,
+        };
+      }
+      return next;
+    });
+    setPeerDiffMessage(direction === "left-to-right" ? "正在将左侧状态应用到右侧..." : "正在将右侧状态应用到左侧...");
+    try {
+      await postJSON(
+        `/rest/db/peerdiffapply?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}`,
+        {
+          direction,
+          files: entries.map((entry) => entry.path),
+        },
+      );
+      setPeerDiffMessage(direction === "left-to-right" ? "已提交左侧到右侧的对等裁决动作。" : "已提交右侧到左侧的对等裁决动作。");
+      setPeerDiffSelection({});
+      await Promise.all([refreshPeerDiff(true), loadBootstrap(), refreshCompare(true), refreshPublish(true)]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "对等差异裁决提交失败";
+      setPeerDiffTasks((previous) => {
+        const next = { ...previous };
+        for (const entry of entries) {
+          const key = bidiffTaskKey(selectedFolder.id, selectedDeviceId, direction, entry.path);
+          const current = next[key];
+          if (!current) {
+            continue;
+          }
+          next[key] = { ...current, status: "failed", error: message, updatedAt: Date.now() };
+        }
+        return next;
+      });
+      setPeerDiffMessage(message);
     }
   };
 
@@ -2367,6 +2563,10 @@ function App() {
                   setSelectedFolderId(folder.id);
                   setBiDiffModalOpen(true);
                 }}
+                onOpenPeerDiff={(folder) => {
+                  setSelectedFolderId(folder.id);
+                  setPeerDiffModalOpen(true);
+                }}
                 onOpenPublish={(folder) => {
                   setSelectedFolderId(folder.id);
                   setPublishModalOpen(true);
@@ -2479,6 +2679,7 @@ function App() {
       {bidiffModalOpen && selectedFolder && (
         <ModalShell title={`双向差异裁决 - ${folderLabel(selectedFolder)}`} onClose={() => setBiDiffModalOpen(false)}>
           <BiDiffPanel
+            mode="bidiff"
             folder={selectedFolder}
             devices={selectedFolderDevices}
             selectedDeviceId={selectedDeviceId}
@@ -2513,6 +2714,48 @@ function App() {
             uiMode={uiMode}
             autoRefreshPaused={bidiffAutoRefreshPaused}
             onToggleAutoRefreshPaused={() => setBidiffAutoRefreshPaused((previous) => !previous)}
+          />
+        </ModalShell>
+      )}
+
+      {peerDiffModalOpen && selectedFolder && (
+        <ModalShell title={`对等差异工作台 - ${folderLabel(selectedFolder)}`} onClose={() => setPeerDiffModalOpen(false)}>
+          <BiDiffPanel
+            mode="peer"
+            folder={selectedFolder}
+            devices={selectedFolderDevices}
+            selectedDeviceId={selectedDeviceId}
+            onSelectDevice={setSelectedDeviceId}
+            selectedDevice={selectedDevice}
+            bidiff={peerDiff}
+            bidiffBusy={peerDiffBusy}
+            bidiffError={peerDiffError}
+            bidiffView={peerDiffView}
+            onBidiffViewChange={setPeerDiffView}
+            bidiffPrefix={peerDiffPrefix}
+            onBidiffPrefixChange={setPeerDiffPrefix}
+            bidiffSelection={peerDiffSelection}
+            onBidiffSelectionChange={setPeerDiffSelection}
+            bidiffMessage={peerDiffMessage}
+            onRefresh={() => void refreshPeerDiff(true)}
+            onApplyLeftToRight={() =>
+              void applyPeerDiffEntries(
+                "left-to-right",
+                (peerDiff?.entries ?? []).filter((entry) => peerDiffSelection[entry.path] && entry.canApplyLeftToRight),
+              )
+            }
+            onApplyRightToLeft={() =>
+              void applyPeerDiffEntries(
+                "right-to-left",
+                (peerDiff?.entries ?? []).filter((entry) => peerDiffSelection[entry.path] && entry.canApplyRightToLeft),
+              )
+            }
+            remoteCompletion={selectedDeviceId ? completions[selectedDeviceId]?.[selectedFolder.id] : undefined}
+            scanBusy={panelScanBusy === "peerdiff"}
+            activeTasks={activePeerDiffTasks}
+            uiMode={uiMode}
+            autoRefreshPaused={peerDiffAutoRefreshPaused}
+            onToggleAutoRefreshPaused={() => setPeerDiffAutoRefreshPaused((previous) => !previous)}
           />
         </ModalShell>
       )}
@@ -2571,6 +2814,7 @@ function OverviewPanel(props: {
   onSelectFolder: (folderId: string) => void;
   onOpenReceive: (folder: FolderConfig) => void;
   onOpenBiDiff: (folder: FolderConfig) => void;
+  onOpenPeerDiff: (folder: FolderConfig) => void;
   onOpenPublish: (folder: FolderConfig) => void;
   onEditFolder: (folder: FolderConfig) => void;
   onEditDevice: (device: DeviceConfig) => void;
@@ -2587,7 +2831,7 @@ function OverviewPanel(props: {
     { key: "need", label: "待同步", width: 55, minWidth: 40 },
     { key: "error", label: "错误", width: 45, minWidth: 35 },
     { key: "devices", label: "远端设备", width: 90, minWidth: 60 },
-    { key: "actions", label: "操作", width: 224, minWidth: 180 },
+    { key: "actions", label: "操作", width: 286, minWidth: 240 },
   ]);
 
   const handleOvResize = (colIndex: number, clientX: number) => {
@@ -2687,6 +2931,9 @@ function OverviewPanel(props: {
                   <button className="mini-button" onClick={() => props.onEditFolder(folder)} title="编辑设置">✎</button>
                   <button className="mini-button secondary" onClick={() => props.onOpenBiDiff(folder)} title="双向裁决">
                     裁决
+                  </button>
+                  <button className="mini-button secondary" onClick={() => props.onOpenPeerDiff(folder)} title="对等差异工作台">
+                    对等
                   </button>
                   <button
                     className="mini-button primary"
@@ -3007,6 +3254,7 @@ function ReceiveReviewPanel(props: {
 }
 
 function BiDiffPanel(props: {
+  mode: "bidiff" | "peer";
   folder: FolderConfig;
   devices: DeviceConfig[];
   selectedDeviceId: string;
@@ -3053,7 +3301,6 @@ function BiDiffPanel(props: {
   const [density, setDensity] = useState<BiDiffDensity>(() =>
     readStoredChoice(BIDIFF_DENSITY_KEY, "normal", ["relaxed", "normal", "compact", "tight"] as const)
   );
-  const [debugNativeChecked, setDebugNativeChecked] = useState(false);
   const [treeMode, setTreeMode] = useState(true);
   const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({});
   const [columns, setColumns] = useState<ColumnDef[]>(() => biDiffColumnsForDensity(density, false));
@@ -3201,13 +3448,14 @@ function BiDiffPanel(props: {
         </div>
 
         <div className="review-stats">
-          <span className="badge tone-info">中立差异裁决</span>
+          <span className="badge tone-info">{props.mode === "peer" ? "对等差异工作台" : "中立差异裁决"}</span>
           <span className={`badge tone-${props.bidiff?.rightConnected ? "success" : "warning"}`}>{props.bidiff?.rightConnected ? "右侧已连接" : "右侧离线"}</span>
           <span>右侧设备：{deviceName(props.selectedDevice ?? undefined)}</span>
           <span>共 {props.bidiff?.total ?? 0} 项</span>
           <span>已选 {selectedTotal} 项</span>
           <span>左→右可执行 {entries.filter((entry) => entry.canApplyLeftToRight).length} 项</span>
           <span>右→左可执行 {entries.filter((entry) => entry.canApplyRightToLeft).length} 项</span>
+          {props.mode === "peer" && <span>本地未正式发布 {props.bidiff?.localPendingItems ?? 0} 项</span>}
           {(selectedLeftToRight > 0 || selectedRightToLeft > 0 || selectedBlocked > 0) && (
             <span>
               当前已选：左→右 {selectedLeftToRight} / 右→左 {selectedRightToLeft}
@@ -3215,14 +3463,26 @@ function BiDiffPanel(props: {
             </span>
           )}
           {treeMode && <span>目录视图 {treeNodes.length} 个顶层节点</span>}
-          <label className="review-native-checkbox-debug" title="用于排查当前页面原生复选框是否正常响应点击">
-            <input
-              type="checkbox"
-              checked={debugNativeChecked}
-              onChange={(event) => setDebugNativeChecked(event.target.checked)}
-            />
-            <span>测试原生复选框：{debugNativeChecked ? "已选中" : "未选中"}</span>
-          </label>
+          {props.mode === "peer" && (
+            <span>
+              预览模式：
+              {props.bidiff?.previewMode === "remote-preview-index-plus-local"
+                ? "本地工作态 + 远端预览索引"
+                : props.bidiff?.previewMode === "announced-index-plus-local"
+                  ? "本地工作态 + 对端最后已知索引"
+                  : "最后已知索引"}
+            </span>
+          )}
+          {props.mode === "peer" && <span>序列：左侧 {props.bidiff?.localSequence ?? 0} / 右侧已知 {props.bidiff?.rightSequence ?? 0}</span>}
+          {props.mode === "peer" && (
+            <span>
+              远端预览：
+              {props.bidiff?.remotePreviewAvailable ? `已接收 #${props.bidiff?.remotePreviewSequence ?? 0}` : "未接收"}
+            </span>
+          )}
+          {props.mode === "peer" && props.bidiff?.remotePreviewAvailable && props.bidiff?.remotePreviewUpdated && (
+            <span>预览更新：{formatDate(props.bidiff.remotePreviewUpdated, timeMode)}</span>
+          )}
           <label className="review-inline-select">
             <span>侧栏宽度</span>
             <select
@@ -3280,18 +3540,27 @@ function BiDiffPanel(props: {
             </>
           )}
         </div>
-        {(!props.bidiff?.manualSync || !props.bidiff?.manualPublish) && (
+        {props.mode === "bidiff" && (!props.bidiff?.manualSync || !props.bidiff?.manualPublish) && (
           <div className="inline-message warning">
             当前文件夹还在自动同步模式。为了保证“只按你选中的文件裁决”，双向裁决建议与手动模式配合使用：
             {!props.bidiff?.manualSync && " 先开启手动审核接收；"}
             {!props.bidiff?.manualPublish && " 先开启手动审核发布；"}
           </div>
         )}
+        {props.mode === "peer" && (
+          <div className="inline-message info">
+            这是独立的对等差异工作台。它的差异显示不再以“手动接收/手动发布是否开启”作为查看门槛；当前设备未正式发布 {props.bidiff?.localPendingItems ?? 0} 项。
+            {props.bidiff?.remotePreviewAvailable
+              ? " 当前已经收到远端预览索引，所以对端未正式发布的变化也会进入对比。"
+              : " 当前还没收到远端预览索引，因此右侧仍可能只是对端最后一次已知正式索引。"}
+            不过“采用左侧”最终要不要在右侧真正落盘，仍然取决于后续显式应用链路，当前版本还没有完全绕开远端自身接收策略。
+          </div>
+        )}
         <div
           className="review-mobile-hint"
-          title="默认只显示差异，不预设参考侧；先勾选再执行。手机建议横屏查看，若内置 WebGUI 操作不顺，建议改用系统浏览器。"
+          title={props.mode === "peer" ? "默认只显示差异，不预设参考侧；先勾选再执行。当前是独立对等工作台，手机建议横屏查看。" : "默认只显示差异，不预设参考侧；先勾选再执行。手机建议横屏查看，若内置 WebGUI 操作不顺，建议改用系统浏览器。"}
         >
-          默认仅看差异，先勾选再执行；手机建议横屏。
+          {props.mode === "peer" ? "默认仅看差异；独立对等工作台，先勾选再执行。" : "默认仅看差异，先勾选再执行；手机建议横屏。 "}
         </div>
 
         {props.bidiffMessage && <div className="inline-message info">{props.bidiffMessage}</div>}

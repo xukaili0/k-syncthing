@@ -163,8 +163,25 @@ export type BiDiffResult = {
   folderCanPublish: boolean;
   manualSync: boolean;
   manualPublish: boolean;
+  localPendingItems?: number;
+  previewMode?: string;
+  localSequence?: number;
+  rightSequence?: number;
+  remotePreviewAvailable?: boolean;
+  remotePreviewSequence?: number;
+  remotePreviewUpdated?: string;
+  peerApplyResults?: {
+    path: string;
+    direction: "left-to-right" | "right-to-left";
+    status: "success" | "failed";
+    message?: string;
+    updated: string;
+  }[];
   rightDeviceID: string;
+  workbench?: "bidiff" | "peer";
 };
+
+export type PeerDiffResult = BiDiffResult;
 
 export type PendingPublishEntry = {
   path: string;
