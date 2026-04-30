@@ -38,6 +38,7 @@ const BIDIFF_DENSITY_KEY = "reactGuiBidiffDensity";
 const compareViewOptions = [
   { value: "different", label: "仅看差异" },
   { value: "all", label: "显示全部" },
+  { value: "incoming", label: "仅远端影响" },
   { value: "delete", label: "仅看删除" },
   { value: "modified", label: "仅看修改" },
   { value: "conflict", label: "仅看冲突" },
@@ -308,6 +309,9 @@ function compareRenameRole(entry: CompareEntry): "old" | "new" | "" {
 }
 
 function pendingPublishLabel(entry: PendingPublishEntry): string {
+  if (entry.settled) {
+    return "已收敛待清理";
+  }
   if (entry.renameCandidate) {
     switch (pendingRenameRole(entry)) {
       case "old":
@@ -405,9 +409,9 @@ function compareSideTone(entry: CompareEntry, side: "local" | "remote"): "succes
     case "only-local":
       return side === "local" ? "success" : "muted";
     case "deleted-remote":
-      return side === "remote" ? "danger" : "warning";
+      return side === "remote" ? "danger" : "muted";
     case "deleted-local":
-      return side === "local" ? "danger" : "warning";
+      return side === "local" ? "danger" : "muted";
     case "modified":
     case "type-changed":
       return "warning";
@@ -417,6 +421,33 @@ function compareSideTone(entry: CompareEntry, side: "local" | "remote"): "succes
       return "success";
     default:
       return "info";
+  }
+}
+
+function pendingPublishSideTone(
+  entry: PendingPublishEntry,
+  side: "local" | "global",
+): "success" | "warning" | "danger" | "muted" | "info" {
+  if (entry.settled) {
+    return "muted";
+  }
+  if (entry.renameCandidate) {
+    const role = pendingRenameRole(entry);
+    if (role === "old") {
+      return side === "local" ? "danger" : "muted";
+    }
+    if (role === "new") {
+      return side === "local" ? "success" : "muted";
+    }
+    return "info";
+  }
+  switch (entry.action) {
+    case "added":
+      return side === "local" ? "success" : "muted";
+    case "delete":
+      return side === "local" ? "danger" : "muted";
+    default:
+      return "warning";
   }
 }
 
@@ -443,6 +474,13 @@ function compareKind(entry: CompareEntry): string {
     default:
       return "neutral";
   }
+}
+
+function filterReceiveEntriesForView(entries: CompareEntry[], view: string): CompareEntry[] {
+  if (view !== "incoming") {
+    return entries;
+  }
+  return entries.filter((entry) => entry.status !== "only-local" && entry.status !== "deleted-local");
 }
 
 function bidiffStatusLabel(entry: BiDiffEntry): string {
@@ -529,9 +567,9 @@ function bidiffSideTone(entry: BiDiffEntry, side: "left" | "right"): "success" |
     case "only-local":
       return side === "left" ? "success" : "muted";
     case "deleted-remote":
-      return side === "right" ? "danger" : "warning";
+      return side === "right" ? "danger" : "muted";
     case "deleted-local":
-      return side === "left" ? "danger" : "warning";
+      return side === "left" ? "danger" : "muted";
     case "modified":
     case "type-changed":
       return "warning";
@@ -665,6 +703,35 @@ type BiDiffTreeRow =
       entry: BiDiffEntry;
     };
 
+type ReviewTreeNode<T extends { path: string }> = {
+  key: string;
+  name: string;
+  fullPath: string;
+  type: "dir" | "file";
+  entry?: T;
+  children: ReviewTreeNode<T>[];
+};
+
+type ReviewTreeRow<T extends { path: string }> =
+  | {
+      type: "dir";
+      key: string;
+      node: ReviewTreeNode<T>;
+      depth: number;
+      guides: boolean[];
+      isLast: boolean;
+      entries: T[];
+    }
+  | {
+      type: "file";
+      key: string;
+      node: ReviewTreeNode<T>;
+      depth: number;
+      guides: boolean[];
+      isLast: boolean;
+      entry: T;
+    };
+
 function bidiffTaskKey(folderId: string, deviceId: string, direction: "left-to-right" | "right-to-left", path: string): string {
   return `${folderId}::${deviceId}::${direction}::${path}`;
 }
@@ -772,6 +839,126 @@ function flattenBiDiffTree(nodes: BiDiffTreeNode[], expanded: Record<string, boo
       });
       if (expanded[node.key] !== false) {
         rows.push(...flattenBiDiffTree(node.children, expanded, depth + 1, [...guides, !isLast]));
+      }
+    } else if (node.entry) {
+      rows.push({
+        type: "file",
+        key: node.key,
+        node,
+        depth,
+        guides,
+        isLast,
+        entry: node.entry,
+      });
+    }
+  }
+  return rows;
+}
+
+function buildReviewTree<T extends { path: string }>(entries: T[]): ReviewTreeNode<T>[] {
+  const roots: ReviewTreeNode<T>[] = [];
+  const directories = new Map<string, ReviewTreeNode<T>>();
+
+  for (const entry of entries) {
+    const parts = splitTreePath(entry.path);
+    if (parts.length === 0) {
+      continue;
+    }
+    let parentChildren = roots;
+    let currentPath = "";
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i];
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      const isLeaf = i === parts.length - 1;
+      if (isLeaf) {
+        parentChildren.push({
+          key: `file:${entry.path}`,
+          name: part,
+          fullPath: entry.path,
+          type: "file",
+          entry,
+          children: [],
+        });
+        continue;
+      }
+      let dir = directories.get(currentPath);
+      if (!dir) {
+        dir = {
+          key: `dir:${currentPath}`,
+          name: part,
+          fullPath: currentPath,
+          type: "dir",
+          children: [],
+        };
+        directories.set(currentPath, dir);
+        parentChildren.push(dir);
+      }
+      parentChildren = dir.children;
+    }
+  }
+
+  const sortNodes = (nodes: ReviewTreeNode<T>[]) => {
+    nodes.sort((a, b) => {
+      if (a.type !== b.type) {
+        return a.type === "dir" ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name, "zh-CN");
+    });
+    for (const node of nodes) {
+      if (node.children.length > 0) {
+        sortNodes(node.children);
+      }
+    }
+  };
+
+  sortNodes(roots);
+  return roots;
+}
+
+function collectReviewLeafEntries<T extends { path: string }>(node: ReviewTreeNode<T>): T[] {
+  if (node.type === "file" && node.entry) {
+    return [node.entry];
+  }
+  const result: T[] = [];
+  for (const child of node.children) {
+    result.push(...collectReviewLeafEntries(child));
+  }
+  return result;
+}
+
+function hasExpandedReviewDirDescendant<T extends { path: string }>(node: ReviewTreeNode<T>, expanded: Record<string, boolean>): boolean {
+  for (const child of node.children) {
+    if (child.type === "dir") {
+      if (expanded[child.key] !== false || hasExpandedReviewDirDescendant(child, expanded)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function flattenReviewTree<T extends { path: string }>(
+  nodes: ReviewTreeNode<T>[],
+  expanded: Record<string, boolean>,
+  depth = 0,
+  guides: boolean[] = [],
+): ReviewTreeRow<T>[] {
+  const rows: ReviewTreeRow<T>[] = [];
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+    const isLast = index === nodes.length - 1;
+    if (node.type === "dir") {
+      rows.push({
+        type: "dir",
+        key: node.key,
+        node,
+        depth,
+        guides,
+        isLast,
+        entries: collectReviewLeafEntries(node),
+      });
+      if (expanded[node.key] !== false) {
+        rows.push(...flattenReviewTree(node.children, expanded, depth + 1, [...guides, !isLast]));
       }
     } else if (node.entry) {
       rows.push({
@@ -1022,8 +1209,24 @@ function FileVersionCell(props: {
   );
 }
 
+function peerWorkbenchDetailText(result: BiDiffResult | null): string {
+  if (!result) {
+    return "这是独立的对等差异工作台。它的差异显示不再以“手动接收/手动发布是否开启”作为查看门槛。";
+  }
+  const previewText = result.remotePreviewAvailable
+    ? "当前已经收到远端预览索引，所以对端未正式发布的变化也会进入对比。"
+    : "当前还没收到远端预览索引，因此右侧仍可能只是对端最后一次已知正式索引。";
+  return `这是独立的对等差异工作台。它的差异显示不再以“手动接收/手动发布是否开启”作为查看门槛；当前设备未正式发布 ${result.localPendingItems ?? 0} 项。${previewText}不过“采用左侧”最终要不要在右侧真正落盘，仍然取决于后续显式应用链路，当前版本还没有完全绕开远端自身接收策略。`;
+}
+
 function BiDiffSizeCell(props: {
-  file?: BiDiffEntry["left"] | BiDiffEntry["right"];
+  file?:
+    | CompareEntry["local"]
+    | CompareEntry["remote"]
+    | PendingPublishEntry["local"]
+    | PendingPublishEntry["global"]
+    | BiDiffEntry["left"]
+    | BiDiffEntry["right"];
   missingLabel: string;
 }) {
   if (!props.file) {
@@ -1033,8 +1236,7 @@ function BiDiffSizeCell(props: {
       </div>
     );
   }
-  const isMuted = props.file.size === 0;
-  const tone = isMuted ? "muted" : "success";
+  const tone = props.file.deleted ? "danger" : "success";
   return (
     <div className={`compare-side-cell tone-${tone}`}>
       <span className="compare-side-cell-value">{formatBinary(props.file.size)}</span>
@@ -1043,7 +1245,13 @@ function BiDiffSizeCell(props: {
 }
 
 function BiDiffTimeCell(props: {
-  file?: BiDiffEntry["left"] | BiDiffEntry["right"];
+  file?:
+    | CompareEntry["local"]
+    | CompareEntry["remote"]
+    | PendingPublishEntry["local"]
+    | PendingPublishEntry["global"]
+    | BiDiffEntry["left"]
+    | BiDiffEntry["right"];
   missingLabel: string;
   dateMode?: "full" | "compact";
 }) {
@@ -1054,8 +1262,7 @@ function BiDiffTimeCell(props: {
       </div>
     );
   }
-  const isMuted = props.file.size === 0;
-  const tone = isMuted ? "muted" : "success";
+  const tone = props.file.deleted ? "danger" : "success";
   return (
     <div className={`compare-side-cell tone-${tone}`}>
       <span className="compare-side-cell-value">{formatDate(props.file.modified, props.dateMode ?? "compact")}</span>
@@ -1180,6 +1387,10 @@ function App() {
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("overview");
   const [uiMode, setUiMode] = useState<UiMode>(() => detectInitialUiMode());
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    const mode = detectInitialUiMode();
+    return mode === "desktop";
+  });
   const [mainRefreshSeconds, setMainRefreshSeconds] = useState(readStoredSeconds(MAIN_REFRESH_KEY, 5));
   const [panelRefreshSeconds, setPanelRefreshSeconds] = useState(readStoredSeconds(PANEL_REFRESH_KEY, 3));
   const [bootBusy, setBootBusy] = useState(false);
@@ -1499,7 +1710,7 @@ function App() {
       setPublishSelection((previous) => {
         const next: Record<string, boolean> = {};
         for (const entry of data.entries) {
-          if (previous[entry.path] && entry.canPublish) {
+          if (previous[entry.path] && (entry.canPublish || entry.canClear)) {
             next[entry.path] = true;
           }
         }
@@ -1675,18 +1886,15 @@ function App() {
         }
         const result = resultMap.get(`${task.direction}::${task.path}`);
         if (result) {
-          const resultUpdated = Date.parse(result.updated);
-          if (Number.isFinite(resultUpdated) && resultUpdated >= task.updatedAt - 1000) {
-            const nextStatus = result.status === "failed" ? "failed" : "completed";
-            next[key] = {
-              ...task,
-              status: nextStatus,
-              error: result.status === "failed" ? result.message || "远端显式应用失败" : undefined,
-              updatedAt: Date.now(),
-            };
-            changed = true;
-            continue;
-          }
+          const nextStatus = result.status === "failed" ? "failed" : "completed";
+          next[key] = {
+            ...task,
+            status: nextStatus,
+            error: result.status === "failed" ? result.message || "远端显式应用失败" : undefined,
+            updatedAt: Date.now(),
+          };
+          changed = true;
+          continue;
         }
         const entry = entryMap.get(task.path);
         const stillActionable =
@@ -1782,6 +1990,10 @@ function App() {
 
   const publishVisibleEntries = useMemo(
     () => (publish?.entries ?? []).filter((entry) => entry.canPublish),
+    [publish],
+  );
+  const publishClearableEntries = useMemo(
+    () => (publish?.entries ?? []).filter((entry) => entry.canClear),
     [publish],
   );
 
@@ -1973,6 +2185,33 @@ function App() {
       await Promise.all([refreshPublish(true), loadBootstrap()]);
     } catch (error) {
       setPublishMessage(error instanceof Error ? error.message : "发布请求失败");
+    }
+  };
+
+  const clearSettledPublishEntries = async (entries: PendingPublishEntry[]) => {
+    if (!selectedFolder) {
+      return;
+    }
+    if (entries.length === 0) {
+      setPublishMessage("当前没有可清理的已收敛待发布项。");
+      return;
+    }
+    setPublishMessage("正在清理已收敛待发布标记...");
+    try {
+      await postJSON(`/rest/db/clearpendingpublish?folder=${encodeURIComponent(selectedFolder.id)}`, {
+        files: entries.map((entry) => entry.path),
+      });
+      setPublishMessage(`已清理 ${entries.length} 项已收敛待发布标记。`);
+      setPublishSelection((previous) => {
+        const next = { ...previous };
+        for (const entry of entries) {
+          delete next[entry.path];
+        }
+        return next;
+      });
+      await Promise.all([refreshPublish(true), loadBootstrap()]);
+    } catch (error) {
+      setPublishMessage(error instanceof Error ? error.message : "清理已收敛待发布标记失败");
     }
   };
 
@@ -2277,9 +2516,23 @@ function App() {
     updateUiModeInUrl(uiMode);
   }, [uiMode]);
 
+  useEffect(() => {
+    if (uiMode === "desktop") {
+      setSidebarOpen(true);
+    } else {
+      setSidebarOpen(false);
+    }
+  }, [uiMode]);
+
   return (
-    <div className={`workspace-shell ui-mode-${uiMode}`}>
-      <aside className="workspace-sidebar">
+    <div className={`workspace-shell ui-mode-${uiMode}${uiMode === "mobile" && sidebarOpen ? " sidebar-open" : ""}`}>
+      {uiMode === "mobile" && sidebarOpen && (
+        <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
+      )}
+      <aside className={`workspace-sidebar ${uiMode === "mobile" ? "drawer" : ""}`}>
+        {uiMode === "mobile" && (
+          <button className="drawer-close-btn" onClick={() => setSidebarOpen(false)} title="关闭侧栏">✕</button>
+        )}
         <div className="brand-block">
           <div className="eyebrow">Syncthing</div>
           <h1>{window.metadata?.deviceIDShort ?? "设备"}</h1>
@@ -2476,6 +2729,9 @@ function App() {
 
       <main className="workspace-main">
         <header className="topbar">
+          {uiMode === "mobile" && !sidebarOpen && (
+            <button className="menu-toggle-btn" onClick={() => setSidebarOpen(true)} title="打开侧栏">☰</button>
+          )}
           <div>
             <div className="eyebrow">当前设备</div>
             <h2>{window.metadata?.deviceIDShort ?? "Syncthing"}</h2>
@@ -2779,6 +3035,10 @@ function App() {
               void publishEntries((publish?.entries ?? []).filter((entry) => publishSelection[entry.path] && entry.canPublish))
             }
             onPublishVisible={() => void publishEntries(publishVisibleEntries)}
+            onClearSettledSelected={() =>
+              void clearSettledPublishEntries((publish?.entries ?? []).filter((entry) => publishSelection[entry.path] && entry.canClear))
+            }
+            onClearSettledVisible={() => void clearSettledPublishEntries(publishClearableEntries)}
             devices={selectedFolderDevices}
             devicesById={devicesById}
             completions={completions}
@@ -3062,14 +3322,36 @@ function ReceiveReviewPanel(props: {
   onSyncVisible: () => void;
   remoteCompletion?: CompletionStatus;
 }) {
-  const entries = props.compare?.entries ?? [];
+  const rawEntries = props.compare?.entries ?? [];
+  const entries = useMemo(() => filterReceiveEntriesForView(rawEntries, props.compareView), [rawEntries, props.compareView]);
   const selectedCount = entries.filter((entry) => props.compareSelection[entry.path] && entry.canPrioritize).length;
+  const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({});
   const [columns, setColumns] = useState<ColumnDef[]>([
     { key: "checkbox", label: "", width: 40, minWidth: 40 },
-    { key: "summary", label: "差异 / 路径", width: 360, minWidth: 220 },
-    { key: "local", label: "当前设备", width: 290, minWidth: 180 },
-    { key: "remote", label: "目标设备", width: 290, minWidth: 180 },
+    { key: "leftSize", label: "本地大小", width: 90, minWidth: 64 },
+    { key: "leftTime", label: "本地时间", width: 100, minWidth: 76 },
+    { key: "status", label: "状态", width: 132, minWidth: 108 },
+    { key: "summary", label: "名称 / 路径", width: 320, minWidth: 220 },
+    { key: "rightTime", label: "远端时间", width: 100, minWidth: 76 },
+    { key: "rightSize", label: "远端大小", width: 90, minWidth: 64 },
   ]);
+  const treeNodes = useMemo(() => buildReviewTree(entries), [entries]);
+  const treeRows = useMemo(() => flattenReviewTree(treeNodes, expandedDirs), [treeNodes, expandedDirs]);
+
+  useEffect(() => {
+    setExpandedDirs((previous) => {
+      const next = { ...previous };
+      let changed = false;
+      for (const node of treeNodes) {
+        if (!(node.key in next)) {
+          next[node.key] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : previous;
+    });
+  }, [treeNodes]);
+
   if (props.devices.length === 0) {
     return (
       <div className="review-modal-layout">
@@ -3097,13 +3379,19 @@ function ReceiveReviewPanel(props: {
             <span>路径前缀</span>
             <input value={props.comparePrefix} onChange={(event) => props.onComparePrefixChange(event.target.value)} placeholder="目录 / 子目录" />
           </label>
+          <button className="ghost-button compact-button" onClick={() => setExpandedDirs((previous) => Object.keys(previous).reduce<Record<string, boolean>>((acc, key) => ({ ...acc, [key]: true }), {}))}>
+            全部展开
+          </button>
+          <button className="ghost-button compact-button" onClick={() => setExpandedDirs((previous) => Object.keys(previous).reduce<Record<string, boolean>>((acc, key) => ({ ...acc, [key]: false }), {}))}>
+            全部折叠
+          </button>
         </div>
 
         <div className="review-stats">
           <span className={`badge tone-${props.compare?.remoteConnected ? "success" : "warning"}`}>{props.compare?.remoteConnected ? "已连接" : "离线"}</span>
           <span>目标设备：{deviceName(props.selectedDevice ?? undefined)}</span>
           <span>远端状态：{remoteStateLabel(props.remoteCompletion?.remoteState)}</span>
-          <span>共 {props.compare?.total ?? 0} 项</span>
+          <span>共 {entries.length} 项</span>
           <span>可操作 {entries.filter((entry) => entry.canPrioritize).length} 项</span>
           <span>已选 {selectedCount} 项</span>
         </div>
@@ -3111,26 +3399,100 @@ function ReceiveReviewPanel(props: {
 
         {props.compareMessage && <div className="inline-message info">{props.compareMessage}</div>}
         {props.compareError && <div className="inline-message danger">{props.compareError}</div>}
+        {props.compareBusy && entries.length === 0 && <div className="compare-empty">正在加载接收审核数据...</div>}
 
         <ResizableTable
           columns={columns}
           onColumnsChange={setColumns}
-          className={`bidiff-table bidiff-font-${fontScale} bidiff-density-${density}`}
+          className="compare-table bidiff-table bidiff-font-normal bidiff-density-normal"
         >
           <thead>
             <tr>{renderResizableHeaders(columns, setColumns)}</tr>
           </thead>
           <tbody>
-            {entries.map((entry) => {
+            {treeRows.map((row) => {
+              if (row.type === "dir") {
+                const selectableEntries = row.entries.filter((entry) => entry.canPrioritize);
+                const selectedChildren = selectableEntries.filter((entry) => props.compareSelection[entry.path]).length;
+                const open = expandedDirs[row.node.key] !== false;
+                const branchActive = hasExpandedReviewDirDescendant(row.node, expandedDirs);
+                return (
+                  <tr
+                    key={row.key}
+                    className={`compare-tree-row compare-tree-dir-row${selectedChildren > 0 ? " contains-selected" : ""}${open ? " is-open" : ""}${branchActive ? " branch-active" : ""}`}
+                  >
+                    <td className="compare-checkbox-cell">
+                      {selectableEntries.length > 0 ? (
+                        <input
+                          type="checkbox"
+                          className="compare-checkbox"
+                          checked={selectedChildren > 0 && selectedChildren === selectableEntries.length}
+                          onChange={(event) => {
+                            const next = { ...props.compareSelection };
+                            for (const entry of selectableEntries) {
+                              if (event.target.checked) {
+                                next[entry.path] = true;
+                              } else {
+                                delete next[entry.path];
+                              }
+                            }
+                            props.onCompareSelectionChange(next);
+                          }}
+                        />
+                      ) : null}
+                    </td>
+                    <td>
+                      <div className="compare-dir-side">
+                        <span className="compare-dir-metric">{row.entries.filter((entry) => entry.local && !entry.local.deleted).length}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="compare-dir-side">
+                        <span className="compare-dir-placeholder">—</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="compare-dir-side compare-dir-side-center">
+                        <span className="compare-dir-placeholder">目录</span>
+                      </div>
+                    </td>
+                    <td className="compare-tree-name-cell">
+                      <div className="compare-tree-summary">
+                        <TreePrefix depth={row.depth} guides={row.guides} isLast={row.isLast} />
+                        <button className="tree-toggle" onClick={() => setExpandedDirs((previous) => ({ ...previous, [row.node.key]: !open }))}>
+                          {open ? "▾" : "▸"}
+                        </button>
+                        <span className="tree-folder-chip tree-folder-icon" aria-hidden="true">📁</span>
+                        <span className="compare-tree-name compare-tree-dir-name">{row.node.name}</span>
+                        <span className="compare-tree-dir-summary">
+                          {row.entries.length} 项差异{selectedChildren > 0 ? ` / 已选 ${selectedChildren}` : ""}
+                        </span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="compare-dir-side">
+                        <span className="compare-dir-placeholder">—</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="compare-dir-side">
+                        <span className="compare-dir-metric">{row.entries.filter((entry) => entry.remote && !entry.remote.deleted).length}</span>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              }
+
+              const entry = row.entry;
               const selected = Boolean(props.compareSelection[entry.path]);
               const kind = compareKind(entry);
               const renameRole = compareRenameRole(entry);
               return (
                 <tr
                   key={entry.path}
-                  className={`tone-${statusTone(entry.status)} kind-${kind}${selected ? " selected" : ""}`}
+                  className={`compare-tree-file-row tone-${statusTone(entry.status)} kind-${kind}${selected ? " selected" : ""}`}
                 >
-                  <td>
+                  <td className="compare-checkbox-cell">
                     <input
                       type="checkbox"
                       className="compare-checkbox"
@@ -3145,7 +3507,13 @@ function ReceiveReviewPanel(props: {
                     />
                   </td>
                   <td>
-                    <div className="compare-status-cell compare-status-stack">
+                    <BiDiffSizeCell file={entry.local} missingLabel="不存在" />
+                  </td>
+                  <td>
+                    <BiDiffTimeCell file={entry.local} missingLabel="不存在" dateMode="compact" />
+                  </td>
+                  <td>
+                    <div className="compare-cell-center compare-status-column">
                       <div className="compare-status-badges">
                         <span className={`badge compare-status-badge tone-${statusTone(entry.status)} kind-${kind}`}>
                           {compareStatusLabel(entry)}
@@ -3156,29 +3524,29 @@ function ReceiveReviewPanel(props: {
                           </span>
                         )}
                       </div>
-                      <div className="compare-path compare-main-path">{entry.path}</div>
-                      {entry.renameCandidate && (
+                    </div>
+                  </td>
+                  <td>
+                    <div className="compare-status-cell compare-status-stack">
+                      <div className="compare-tree-fileline" title={entry.path}>
+                        <TreePrefix depth={row.depth} guides={row.guides} isLast={row.isLast} />
+                        <span className="tree-file-dot" aria-hidden="true" />
+                        <span className="compare-tree-name compare-tree-file-name">{row.node.name}</span>
+                      </div>
+                      {entry.renameCandidate ? (
                         <div className={`helper-line compare-pair-line role-${renameRole || "pair"}`}>
                           {renameRole === "new"
                             ? `新路径；旧路径：${entry.renameCandidate}`
                             : `旧路径；新路径：${entry.renameCandidate}`}
                         </div>
-                      )}
+                      ) : null}
                     </div>
                   </td>
                   <td>
-                    <FileVersionCell
-                      file={entry.local}
-                      missingLabel="不存在"
-                      tone={compareSideTone(entry, "local")}
-                    />
+                    <BiDiffTimeCell file={entry.remote} missingLabel="不存在" dateMode="compact" />
                   </td>
                   <td>
-                    <FileVersionCell
-                      file={entry.remote}
-                      missingLabel="不存在"
-                      tone={compareSideTone(entry, "remote")}
-                    />
+                    <BiDiffSizeCell file={entry.remote} missingLabel="不存在" />
                   </td>
                 </tr>
               );
@@ -3307,6 +3675,13 @@ function BiDiffPanel(props: {
   const treeNodes = useMemo(() => buildBiDiffTree(entries), [entries]);
   const treeRows = useMemo(() => flattenBiDiffTree(treeNodes, expandedDirs), [treeNodes, expandedDirs]);
   const mobileRows = treeMode ? treeRows : entries.map((entry) => ({ type: "file" as const, key: `file:${entry.path}`, node: { key: `file:${entry.path}`, name: entry.path, fullPath: entry.path, type: "file" as const, entry, children: [] }, depth: 0, guides: [], isLast: true, entry }));
+  const headerDetailText =
+    props.mode === "peer"
+      ? `默认只显示差异，不预设参考侧；先勾选再执行。当前是独立对等工作台，手机建议横屏查看。${peerWorkbenchDetailText(props.bidiff)}`
+      : "默认只显示差异，不预设参考侧；先勾选再执行。手机建议横屏查看，若内置 WebGUI 操作不顺，建议改用系统浏览器。";
+  const peerSummaryCompact = props.bidiff
+    ? `对等工作台 · 未发布 ${props.bidiff.localPendingItems ?? 0} 项 · 远端预览${props.bidiff.remotePreviewAvailable ? "已接收" : "未接收"}`
+    : "对等工作台 · 正在准备差异数据";
 
   useEffect(() => {
     setExpandedDirs((previous) => {
@@ -3548,19 +3923,17 @@ function BiDiffPanel(props: {
           </div>
         )}
         {props.mode === "peer" && (
-          <div className="inline-message info">
-            这是独立的对等差异工作台。它的差异显示不再以“手动接收/手动发布是否开启”作为查看门槛；当前设备未正式发布 {props.bidiff?.localPendingItems ?? 0} 项。
-            {props.bidiff?.remotePreviewAvailable
-              ? " 当前已经收到远端预览索引，所以对端未正式发布的变化也会进入对比。"
-              : " 当前还没收到远端预览索引，因此右侧仍可能只是对端最后一次已知正式索引。"}
-            不过“采用左侧”最终要不要在右侧真正落盘，仍然取决于后续显式应用链路，当前版本还没有完全绕开远端自身接收策略。
+          <div className="review-summary-compact" title={peerWorkbenchDetailText(props.bidiff)}>
+            <span className="badge tone-info">对等</span>
+            <span className="review-summary-text">{peerSummaryCompact}</span>
+            <span className="review-summary-help">悬浮查看详细说明</span>
           </div>
         )}
         <div
           className="review-mobile-hint"
-          title={props.mode === "peer" ? "默认只显示差异，不预设参考侧；先勾选再执行。当前是独立对等工作台，手机建议横屏查看。" : "默认只显示差异，不预设参考侧；先勾选再执行。手机建议横屏查看，若内置 WebGUI 操作不顺，建议改用系统浏览器。"}
+          title={headerDetailText}
         >
-          {props.mode === "peer" ? "默认仅看差异；独立对等工作台，先勾选再执行。" : "默认仅看差异，先勾选再执行；手机建议横屏。 "}
+          {props.mode === "peer" ? "默认仅看差异；先勾选再执行。" : "默认仅看差异，先勾选再执行；手机建议横屏。 "}
         </div>
 
         {props.bidiffMessage && <div className="inline-message info">{props.bidiffMessage}</div>}
@@ -3728,7 +4101,7 @@ function BiDiffPanel(props: {
                         </div>
                       </td>
                     )}
-                    <td>
+                    <td className="compare-tree-name-cell">
                       <div className="compare-tree-summary">
                         <TreePrefix depth={row.depth} guides={row.guides} isLast={row.isLast} />
                         <button
@@ -3929,10 +4302,18 @@ function BiDiffPanel(props: {
           </button>
           <button
             className="primary-button"
-            onClick={props.onApplyLeftToRight}
+            onClick={() => {
+              if (
+                props.mode === "bidiff" &&
+                !window.confirm("采用左侧会把当前设备状态推向右侧。最好确保远端自动接收，或后续在远端继续处理。是否继续？")
+              ) {
+                return;
+              }
+              props.onApplyLeftToRight();
+            }}
             disabled={selectedLeftToRight === 0}
             style={{ width: "100%" }}
-            title="把当前设备状态推到右侧"
+            title={props.mode === "bidiff" ? "把当前设备状态推到右侧。最好确保远端自动接收。" : "把当前设备状态推到右侧"}
           >
             采用左侧（可执行 {selectedLeftToRight} / 已选 {selectedTotal}）
           </button>
@@ -3966,6 +4347,8 @@ function PublishReviewPanel(props: {
   onRefresh: () => void;
   onPublishSelected: () => void;
   onPublishVisible: () => void;
+  onClearSettledSelected: () => void;
+  onClearSettledVisible: () => void;
   devices: DeviceConfig[];
   devicesById: Map<string, DeviceConfig>;
   completions: Record<string, Record<string, CompletionStatus>>;
@@ -3973,12 +4356,39 @@ function PublishReviewPanel(props: {
 }) {
   const entries = props.publish?.entries ?? [];
   const selectedCount = entries.filter((entry) => props.publishSelection[entry.path] && entry.canPublish).length;
+  const selectedClearCount = entries.filter((entry) => props.publishSelection[entry.path] && entry.canClear).length;
+  const clearableCount = entries.filter((entry) => entry.canClear).length;
+  const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({});
+  const publishEmptyText = !canPublish(props.folder)
+    ? "当前文件夹没有发布能力，所以这里不会出现待发布项。"
+    : props.publishBusy && !props.publish
+      ? "正在加载发布审核数据..."
+      : "当前筛选条件下没有待发布项。";
   const [columns, setColumns] = useState<ColumnDef[]>([
     { key: "checkbox", label: "", width: 40, minWidth: 40 },
-    { key: "summary", label: "发布变化 / 路径", width: 360, minWidth: 220 },
-    { key: "local", label: "当前待发布版本", width: 290, minWidth: 180 },
-    { key: "global", label: "当前对外可见版本", width: 290, minWidth: 180 },
+    { key: "leftSize", label: "待发布大小", width: 90, minWidth: 64 },
+    { key: "leftTime", label: "待发布时间", width: 100, minWidth: 76 },
+    { key: "status", label: "状态", width: 132, minWidth: 108 },
+    { key: "summary", label: "名称 / 路径", width: 320, minWidth: 220 },
+    { key: "rightTime", label: "可见时间", width: 100, minWidth: 76 },
+    { key: "rightSize", label: "可见大小", width: 90, minWidth: 64 },
   ]);
+  const treeNodes = useMemo(() => buildReviewTree(entries), [entries]);
+  const treeRows = useMemo(() => flattenReviewTree(treeNodes, expandedDirs), [treeNodes, expandedDirs]);
+
+  useEffect(() => {
+    setExpandedDirs((previous) => {
+      const next = { ...previous };
+      let changed = false;
+      for (const node of treeNodes) {
+        if (!(node.key in next)) {
+          next[node.key] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : previous;
+    });
+  }, [treeNodes]);
   return (
     <div className="review-modal-layout">
       <div className="review-modal-main">
@@ -3997,6 +4407,12 @@ function PublishReviewPanel(props: {
             <span>路径前缀</span>
             <input value={props.publishPrefix} onChange={(event) => props.onPublishPrefixChange(event.target.value)} placeholder="目录 / 子目录" />
           </label>
+          <button className="ghost-button compact-button" onClick={() => setExpandedDirs((previous) => Object.keys(previous).reduce<Record<string, boolean>>((acc, key) => ({ ...acc, [key]: true }), {}))}>
+            全部展开
+          </button>
+          <button className="ghost-button compact-button" onClick={() => setExpandedDirs((previous) => Object.keys(previous).reduce<Record<string, boolean>>((acc, key) => ({ ...acc, [key]: false }), {}))}>
+            全部折叠
+          </button>
         </div>
 
         <div className="review-stats">
@@ -4004,32 +4420,108 @@ function PublishReviewPanel(props: {
           <span>共享设备：{props.devices.length}</span>
           <span>共 {props.publish?.total ?? 0} 项</span>
           <span>可发布 {entries.filter((entry) => entry.canPublish).length} 项</span>
+          <span>可清理 {clearableCount} 项</span>
           <span>已选 {selectedCount} 项</span>
         </div>
         <div className="review-mobile-hint">手机建议横屏查看；表格可左右滑动，按住列头分隔线可调整列宽。若 Android 内置 WebGUI 操作不顺，建议改用“在浏览器中打开”后再查看。</div>
 
         {props.publishMessage && <div className="inline-message info">{props.publishMessage}</div>}
         {props.publishError && <div className="inline-message danger">{props.publishError}</div>}
+        {props.publishBusy && entries.length === 0 && <div className="compare-empty">正在加载发布审核数据...</div>}
 
-        <ResizableTable columns={columns} onColumnsChange={setColumns}>
+        <ResizableTable columns={columns} onColumnsChange={setColumns} className="compare-table bidiff-table bidiff-font-normal bidiff-density-normal">
           <thead>
             <tr>{renderResizableHeaders(columns, setColumns)}</tr>
           </thead>
           <tbody>
-            {entries.map((entry) => {
+            {treeRows.map((row) => {
+              if (row.type === "dir") {
+                const selectableEntries = row.entries.filter((entry) => entry.canPublish || entry.canClear);
+                const selectedChildren = selectableEntries.filter((entry) => props.publishSelection[entry.path]).length;
+                const open = expandedDirs[row.node.key] !== false;
+                const branchActive = hasExpandedReviewDirDescendant(row.node, expandedDirs);
+                return (
+                  <tr
+                    key={row.key}
+                    className={`compare-tree-row compare-tree-dir-row${selectedChildren > 0 ? " contains-selected" : ""}${open ? " is-open" : ""}${branchActive ? " branch-active" : ""}`}
+                  >
+                    <td className="compare-checkbox-cell">
+                      {selectableEntries.length > 0 ? (
+                        <input
+                          type="checkbox"
+                          className="compare-checkbox"
+                          checked={selectedChildren > 0 && selectedChildren === selectableEntries.length}
+                          onChange={(event) => {
+                            const next = { ...props.publishSelection };
+                            for (const entry of selectableEntries) {
+                              if (event.target.checked) {
+                                next[entry.path] = true;
+                              } else {
+                                delete next[entry.path];
+                              }
+                            }
+                            props.onPublishSelectionChange(next);
+                          }}
+                        />
+                      ) : null}
+                    </td>
+                    <td>
+                      <div className="compare-dir-side">
+                        <span className="compare-dir-metric">{row.entries.filter((entry) => entry.local && !entry.local.deleted).length}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="compare-dir-side">
+                        <span className="compare-dir-placeholder">—</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="compare-dir-side compare-dir-side-center">
+                        <span className="compare-dir-placeholder">目录</span>
+                      </div>
+                    </td>
+                    <td className="compare-tree-name-cell">
+                      <div className="compare-tree-summary">
+                        <TreePrefix depth={row.depth} guides={row.guides} isLast={row.isLast} />
+                        <button className="tree-toggle" onClick={() => setExpandedDirs((previous) => ({ ...previous, [row.node.key]: !open }))}>
+                          {open ? "▾" : "▸"}
+                        </button>
+                        <span className="tree-folder-chip tree-folder-icon" aria-hidden="true">📁</span>
+                        <span className="compare-tree-name compare-tree-dir-name">{row.node.name}</span>
+                        <span className="compare-tree-dir-summary">
+                          {row.entries.length} 项差异{selectedChildren > 0 ? ` / 已选 ${selectedChildren}` : ""}
+                        </span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="compare-dir-side">
+                        <span className="compare-dir-placeholder">—</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="compare-dir-side">
+                        <span className="compare-dir-metric">{row.entries.filter((entry) => entry.global && !entry.global.deleted).length}</span>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              }
+
+              const entry = row.entry;
               const selected = Boolean(props.publishSelection[entry.path]);
-              const tone = entry.renameCandidate ? "info" : entry.action === "delete" ? "muted" : entry.action === "added" ? "success" : "warning";
+              const tone = entry.settled ? "muted" : entry.renameCandidate ? "info" : entry.action === "delete" ? "danger" : entry.action === "added" ? "success" : "warning";
+              const renameRole = pendingRenameRole(entry);
               return (
                 <tr
                   key={entry.path}
-                  className={`tone-${tone}${selected ? " selected" : ""}`}
+                  className={`compare-tree-file-row tone-${tone}${selected ? " selected" : ""}`}
                 >
-                  <td>
+                  <td className="compare-checkbox-cell">
                     <input
                       type="checkbox"
                       className="compare-checkbox"
                       checked={selected}
-                      disabled={!entry.canPublish}
+                      disabled={!(entry.canPublish || entry.canClear)}
                       onChange={(event) =>
                         props.onPublishSelectionChange({
                           ...props.publishSelection,
@@ -4039,23 +4531,45 @@ function PublishReviewPanel(props: {
                     />
                   </td>
                   <td>
-                    <div className="compare-status-cell compare-status-stack">
-                      <span className={`badge tone-${tone}`}>{pendingPublishLabel(entry)}</span>
-                      <div className="compare-path compare-main-path">{entry.path}</div>
-                      {entry.renameCandidate && (
-                        <div className="helper-line">
-                          {pendingRenameRole(entry) === "new"
-                            ? `新路径；旧路径：${entry.renameCandidate}`
-                            : `旧路径；新路径：${entry.renameCandidate}`}
-                        </div>
-                      )}
+                    <BiDiffSizeCell file={entry.local} missingLabel="不存在" />
+                  </td>
+                  <td>
+                    <BiDiffTimeCell file={entry.local} missingLabel="不存在" dateMode="compact" />
+                  </td>
+                  <td>
+                    <div className="compare-cell-center compare-status-column">
+                      <div className="compare-status-badges">
+                        <span className={`badge compare-status-badge tone-${tone}`}>{pendingPublishLabel(entry)}</span>
+                        {renameRole && (
+                          <span className={`badge compare-role-badge role-${renameRole}`}>
+                            {renameRole === "old" ? "旧路径" : "新路径"}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </td>
                   <td>
-                    <FileVersionCell file={entry.local} missingLabel="不存在" tone={tone} />
+                    <div className="compare-status-cell compare-status-stack">
+                      <div className="compare-tree-fileline" title={entry.path}>
+                        <TreePrefix depth={row.depth} guides={row.guides} isLast={row.isLast} />
+                        <span className="tree-file-dot" aria-hidden="true" />
+                        <span className="compare-tree-name compare-tree-file-name">{row.node.name}</span>
+                      </div>
+                      {entry.renameCandidate ? (
+                        <div className={`helper-line compare-pair-line role-${renameRole || "pair"}`}>
+                          {renameRole === "new"
+                            ? `新路径；旧路径：${entry.renameCandidate}`
+                            : `旧路径；新路径：${entry.renameCandidate}`}
+                        </div>
+                      ) : null}
+                      {entry.settled && <div className="helper-line">已与当前全局状态一致，可直接清理待发布标记。</div>}
+                    </div>
                   </td>
                   <td>
-                    <FileVersionCell file={entry.global} missingLabel="尚未对外可见" tone={tone} />
+                    <BiDiffTimeCell file={entry.global} missingLabel="尚未对外可见" dateMode="compact" />
+                  </td>
+                  <td>
+                    <BiDiffSizeCell file={entry.global} missingLabel="尚未对外可见" />
                   </td>
                 </tr>
               );
@@ -4064,7 +4578,7 @@ function PublishReviewPanel(props: {
         </ResizableTable>
 
         {entries.length === 0 && !props.publishBusy && (
-          <div className="compare-empty">当前筛选条件下没有待发布项。</div>
+          <div className="compare-empty">{publishEmptyText}</div>
         )}
       </div>
 
@@ -4111,12 +4625,45 @@ function PublishReviewPanel(props: {
             发布当前结果
           </button>
           <button
+            className="ghost-button"
+            onClick={() =>
+              props.onPublishSelectionChange(
+                entries.reduce<Record<string, boolean>>((acc, entry) => {
+                  if (entry.canClear) {
+                    acc[entry.path] = true;
+                  }
+                  return acc;
+                }, {}),
+              )
+            }
+            disabled={clearableCount === 0}
+            style={{ width: "100%" }}
+          >
+            选中已收敛项
+          </button>
+          <button
             className="primary-button"
             onClick={props.onPublishSelected}
             disabled={selectedCount === 0}
             style={{ width: "100%" }}
           >
             发布已选条目
+          </button>
+          <button
+            className="primary-button secondary-fill"
+            onClick={props.onClearSettledVisible}
+            disabled={clearableCount === 0}
+            style={{ width: "100%" }}
+          >
+            清理全部已收敛项
+          </button>
+          <button
+            className="ghost-button"
+            onClick={props.onClearSettledSelected}
+            disabled={selectedClearCount === 0}
+            style={{ width: "100%" }}
+          >
+            清理已选收敛项
           </button>
         </div>
       </div>

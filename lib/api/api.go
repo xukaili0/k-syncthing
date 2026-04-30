@@ -291,27 +291,28 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/log.txt", s.getSystemLogTxt)            // [since]
 
 	// The POST handlers
-	restMux.HandlerFunc(http.MethodPost, "/rest/db/prio", s.postDBPrio)                          // folder file
-	restMux.HandlerFunc(http.MethodPost, "/rest/db/pull", s.postDBPull)                          // folder
-	restMux.HandlerFunc(http.MethodPost, "/rest/db/pullselected", s.postDBPullSelected)          // folder <body>
-	restMux.HandlerFunc(http.MethodPost, "/rest/db/publishselected", s.postDBPublishSelected)    // folder <body>
-	restMux.HandlerFunc(http.MethodPost, "/rest/db/bidiffapply", s.postDBBiDiffApply)            // folder device <body>
-	restMux.HandlerFunc(http.MethodPost, "/rest/db/peerdiffapply", s.postDBPeerDiffApply)        // folder device <body>
-	restMux.HandlerFunc(http.MethodPost, "/rest/db/ignores", s.postDBIgnores)                    // folder
-	restMux.HandlerFunc(http.MethodPost, "/rest/db/override", s.postDBOverride)                  // folder
-	restMux.HandlerFunc(http.MethodPost, "/rest/db/revert", s.postDBRevert)                      // folder
-	restMux.HandlerFunc(http.MethodPost, "/rest/db/scan", s.postDBScan)                          // folder [sub...] [delay]
-	restMux.HandlerFunc(http.MethodPost, "/rest/folder/versions", s.postFolderVersionsRestore)   // folder <body>
-	restMux.HandlerFunc(http.MethodPost, "/rest/system/error", s.postSystemError)                // <body>
-	restMux.HandlerFunc(http.MethodPost, "/rest/system/error/clear", s.postSystemErrorClear)     // -
-	restMux.HandlerFunc(http.MethodPost, "/rest/system/ping", s.restPing)                        // -
-	restMux.HandlerFunc(http.MethodPost, "/rest/system/reset", s.postSystemReset)                // [folder]
-	restMux.HandlerFunc(http.MethodPost, "/rest/system/restart", s.postSystemRestart)            // -
-	restMux.HandlerFunc(http.MethodPost, "/rest/system/shutdown", s.postSystemShutdown)          // -
-	restMux.HandlerFunc(http.MethodPost, "/rest/system/upgrade", s.postSystemUpgrade)            // -
-	restMux.HandlerFunc(http.MethodPost, "/rest/system/pause", s.makeDevicePauseHandler(true))   // [device]
-	restMux.HandlerFunc(http.MethodPost, "/rest/system/resume", s.makeDevicePauseHandler(false)) // [device]
-	restMux.HandlerFunc(http.MethodPost, "/rest/system/loglevels", s.postSystemDebug)            // [enable] [disable]
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/prio", s.postDBPrio)                               // folder file
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/pull", s.postDBPull)                               // folder
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/pullselected", s.postDBPullSelected)               // folder <body>
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/publishselected", s.postDBPublishSelected)         // folder <body>
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/clearpendingpublish", s.postDBClearPendingPublish) // folder <body>
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/bidiffapply", s.postDBBiDiffApply)                 // folder device <body>
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/peerdiffapply", s.postDBPeerDiffApply)             // folder device <body>
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/ignores", s.postDBIgnores)                         // folder
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/override", s.postDBOverride)                       // folder
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/revert", s.postDBRevert)                           // folder
+	restMux.HandlerFunc(http.MethodPost, "/rest/db/scan", s.postDBScan)                               // folder [sub...] [delay]
+	restMux.HandlerFunc(http.MethodPost, "/rest/folder/versions", s.postFolderVersionsRestore)        // folder <body>
+	restMux.HandlerFunc(http.MethodPost, "/rest/system/error", s.postSystemError)                     // <body>
+	restMux.HandlerFunc(http.MethodPost, "/rest/system/error/clear", s.postSystemErrorClear)          // -
+	restMux.HandlerFunc(http.MethodPost, "/rest/system/ping", s.restPing)                             // -
+	restMux.HandlerFunc(http.MethodPost, "/rest/system/reset", s.postSystemReset)                     // [folder]
+	restMux.HandlerFunc(http.MethodPost, "/rest/system/restart", s.postSystemRestart)                 // -
+	restMux.HandlerFunc(http.MethodPost, "/rest/system/shutdown", s.postSystemShutdown)               // -
+	restMux.HandlerFunc(http.MethodPost, "/rest/system/upgrade", s.postSystemUpgrade)                 // -
+	restMux.HandlerFunc(http.MethodPost, "/rest/system/pause", s.makeDevicePauseHandler(true))        // [device]
+	restMux.HandlerFunc(http.MethodPost, "/rest/system/resume", s.makeDevicePauseHandler(false))      // [device]
+	restMux.HandlerFunc(http.MethodPost, "/rest/system/loglevels", s.postSystemDebug)                 // [enable] [disable]
 
 	// The DELETE handlers
 	restMux.HandlerFunc(http.MethodDelete, "/rest/cluster/pending/devices", s.deletePendingDevices) // device
@@ -924,6 +925,7 @@ func (s *service) getDBPendingPublish(w http.ResponseWriter, r *http.Request) {
 		"page":             result.Page,
 		"perpage":          result.PerPage,
 		"total":            result.Total,
+		"settledTotal":     result.SettledTotal,
 		"manualPublish":    result.ManualPublish,
 		"folderCanPublish": result.FolderCanPublish,
 		"view":             result.RequestedView,
@@ -1148,6 +1150,40 @@ func (s *service) postDBPublishSelected(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := s.model.PublishFolderSelected(folder, body.Files); err != nil {
+		if isFolderNotFound(err) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]any{
+		"ok":    true,
+		"files": body.Files,
+	})
+}
+
+func (s *service) postDBClearPendingPublish(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+	folder := qs.Get("folder")
+
+	bs, err := io.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var body struct {
+		Files []string `json:"files"`
+	}
+	if err := json.Unmarshal(bs, &body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := s.model.ClearSettledPendingPublishSelected(folder, body.Files); err != nil {
 		if isFolderNotFound(err) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -2212,6 +2248,8 @@ func (e jsonPendingPublishEntry) MarshalJSON() ([]byte, error) {
 		"action":          entry.Action,
 		"renameCandidate": entry.RenameCandidate,
 		"canPublish":      entry.CanPublish,
+		"settled":         entry.Settled,
+		"canClear":        entry.CanClear,
 	}
 	if entry.Local != nil {
 		out["local"] = jsonFileInfo(*entry.Local)

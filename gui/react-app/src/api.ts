@@ -188,6 +188,8 @@ export type PendingPublishEntry = {
   action: string;
   renameCandidate?: string;
   canPublish: boolean;
+  settled?: boolean;
+  canClear?: boolean;
   local?: JsonFileInfo;
   global?: JsonFileInfo;
 };
@@ -197,6 +199,7 @@ export type PendingPublishResult = {
   page: number;
   perpage: number;
   total: number;
+  settledTotal?: number;
   manualPublish: boolean;
   folderCanPublish: boolean;
 };

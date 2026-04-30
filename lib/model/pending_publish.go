@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"path"
 	"slices"
+	"time"
 
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/events"
@@ -37,6 +38,8 @@ type PendingPublishEntry struct {
 	Global          *protocol.FileInfo
 	RenameCandidate string
 	CanPublish      bool
+	Settled         bool
+	CanClear        bool
 }
 
 type PendingPublishResult struct {
@@ -44,6 +47,7 @@ type PendingPublishResult struct {
 	Page             int
 	PerPage          int
 	Total            int
+	SettledTotal     int
 	ManualPublish    bool
 	FolderCanPublish bool
 	RequestedView    string
@@ -66,9 +70,15 @@ func (m *model) PendingPublishFolderFiles(folder string, opts PendingPublishOpti
 		return PendingPublishResult{}, err
 	}
 
-	entries := buildPendingPublishEntries(m, folder, localFiles)
+	entries := buildPendingPublishEntries(m, folder, localFiles, cfg.ModTimeWindow())
 	entries = filterPendingPublishEntries(entries, opts.View)
 	total := len(entries)
+	settledTotal := 0
+	for _, entry := range entries {
+		if entry.Settled {
+			settledTotal++
+		}
+	}
 
 	start := (opts.Page - 1) * opts.PerPage
 	if start > total {
@@ -87,6 +97,7 @@ func (m *model) PendingPublishFolderFiles(folder string, opts PendingPublishOpti
 		Page:             opts.Page,
 		PerPage:          opts.PerPage,
 		Total:            total,
+		SettledTotal:     settledTotal,
 		ManualPublish:    cfg.ManualPublish,
 		FolderCanPublish: folderTypeCanPublish(cfg.Type),
 		RequestedView:    opts.View,
@@ -107,7 +118,7 @@ func normalizePendingPublishOptions(opts PendingPublishOptions) PendingPublishOp
 	return opts
 }
 
-func buildPendingPublishEntries(m *model, folder string, localFiles map[string]protocol.FileInfo) []PendingPublishEntry {
+func buildPendingPublishEntries(m *model, folder string, localFiles map[string]protocol.FileInfo, modTimeWindow time.Duration) []PendingPublishEntry {
 	names := make([]string, 0, len(localFiles))
 	for name, fi := range localFiles {
 		if fi.IsIgnored() || !fi.IsManualPublishPending() {
@@ -134,6 +145,9 @@ func buildPendingPublishEntries(m *model, folder string, localFiles map[string]p
 		if ok && !global.IsManualPublishPending() {
 			entry.Global = &global
 		}
+		entry.Settled = pendingPublishSettled(entry, modTimeWindow)
+		entry.CanClear = entry.Settled
+		entry.CanPublish = !entry.Settled
 		entry.Action = pendingPublishAction(entry)
 		entries = append(entries, entry)
 	}
@@ -141,6 +155,19 @@ func buildPendingPublishEntries(m *model, folder string, localFiles map[string]p
 	markPendingPublishRenameCandidates(entries)
 	sortPendingPublishEntries(entries)
 	return entries
+}
+
+func pendingPublishSettled(entry PendingPublishEntry, modTimeWindow time.Duration) bool {
+	if entry.Local == nil || entry.Global == nil {
+		return false
+	}
+	if entry.Local.IsDeleted() && entry.Global.IsDeleted() {
+		return true
+	}
+	if entry.Local.IsDeleted() != entry.Global.IsDeleted() {
+		return false
+	}
+	return entry.Local.IsEquivalent(*entry.Global, modTimeWindow)
 }
 
 func pendingPublishAction(entry PendingPublishEntry) string {
@@ -376,6 +403,7 @@ func folderTypeCanPublish(t config.FolderType) bool {
 }
 
 func (m *model) PublishFolderSelected(folder string, files []string) error {
+	files = m.expandPendingPublishSelectionWithRename(folder, files)
 	m.mut.RLock()
 	cfg, cfgOK := m.folderCfgs[folder]
 	m.mut.RUnlock()
@@ -413,6 +441,120 @@ func (m *model) PublishFolderSelected(folder string, files []string) error {
 		return nil
 	}
 
+	if err := m.sdb.Update(folder, protocol.LocalDeviceID, updates); err != nil {
+		return err
+	}
+
+	seq, err := m.sdb.GetDeviceSequence(folder, protocol.LocalDeviceID)
+	if err != nil {
+		return err
+	}
+	names := make([]string, len(updates))
+	for i, file := range updates {
+		names[i] = file.Name
+	}
+	m.evLogger.Log(events.LocalIndexUpdated, map[string]interface{}{
+		"folder":    folder,
+		"items":     len(updates),
+		"filenames": names,
+		"sequence":  seq,
+		"version":   seq,
+	})
+	return nil
+}
+
+func expandSelectionWithPendingPublishRename(entries []PendingPublishEntry, files []string) []string {
+	selected := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		selected[file] = struct{}{}
+	}
+	for _, entry := range entries {
+		if entry.RenameCandidate == "" {
+			continue
+		}
+		if _, ok := selected[entry.Path]; ok {
+			selected[entry.RenameCandidate] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(selected))
+	for path := range selected {
+		out = append(out, path)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func (m *model) expandPendingPublishSelectionWithRename(folder string, files []string) []string {
+	files = uniquePaths(files)
+	if len(files) == 0 {
+		return files
+	}
+	localFiles, err := m.collectCompareFiles(folder, protocol.LocalDeviceID, "")
+	if err != nil {
+		return files
+	}
+	m.mut.RLock()
+	cfg, ok := m.folderCfgs[folder]
+	m.mut.RUnlock()
+	if !ok {
+		return files
+	}
+	entries := buildPendingPublishEntries(m, folder, localFiles, cfg.ModTimeWindow())
+	return expandSelectionWithPendingPublishRename(entries, files)
+}
+
+func (m *model) ClearSettledPendingPublishSelected(folder string, files []string) error {
+	files = uniquePaths(files)
+	if len(files) == 0 {
+		return nil
+	}
+
+	m.mut.RLock()
+	cfg, cfgOK := m.folderCfgs[folder]
+	m.mut.RUnlock()
+	if !cfgOK {
+		return ErrFolderMissing
+	}
+	if cfg.Paused {
+		return ErrFolderPaused
+	}
+
+	localFiles, err := m.collectCompareFiles(folder, protocol.LocalDeviceID, "")
+	if err != nil {
+		return err
+	}
+	entries := buildPendingPublishEntries(m, folder, localFiles, cfg.ModTimeWindow())
+	settled := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.Settled && entry.CanClear {
+			settled[entry.Path] = struct{}{}
+		}
+	}
+
+	updates := make([]protocol.FileInfo, 0, len(files))
+	seen := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		if _, ok := seen[file]; ok {
+			continue
+		}
+		seen[file] = struct{}{}
+		if _, ok := settled[file]; !ok {
+			continue
+		}
+		fi, ok, err := m.sdb.GetDeviceFile(folder, protocol.LocalDeviceID, file)
+		if err != nil {
+			return err
+		}
+		if !ok || !fi.IsManualPublishPending() {
+			continue
+		}
+		fi.LocalFlags &^= protocol.FlagLocalManualPublish
+		updates = append(updates, fi)
+	}
+
+	if len(updates) == 0 {
+		return nil
+	}
 	if err := m.sdb.Update(folder, protocol.LocalDeviceID, updates); err != nil {
 		return err
 	}

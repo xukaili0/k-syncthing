@@ -7,6 +7,7 @@
 package model
 
 import (
+	"path"
 	"slices"
 	"strings"
 	"time"
@@ -63,6 +64,15 @@ type BiDiffResult struct {
 	RightDeviceID          protocol.DeviceID
 	RequestedView          string
 	RequestedPrefix        string
+}
+
+type preparedRemoteApplyEntry struct {
+	path     string
+	status   string
+	local    protocol.FileInfo
+	localOK  bool
+	remote   protocol.FileInfo
+	remoteOK bool
 }
 
 func (m *model) BiDiffFolderFiles(folder string, device protocol.DeviceID, opts BiDiffOptions) (BiDiffResult, error) {
@@ -329,6 +339,10 @@ func (m *model) peerdiffEntryCanApplyRightToLeft(folder string, cfg config.Folde
 }
 
 func (m *model) ApplyBiDiffSelection(folder string, device protocol.DeviceID, direction string, files []string) error {
+	files, err := m.expandBiDiffSelectionWithRename(folder, device, files, false)
+	if err != nil {
+		return err
+	}
 	switch direction {
 	case BiDiffDirectionLeftToRight:
 		return m.PromoteFolderSelected(folder, device, files)
@@ -340,6 +354,11 @@ func (m *model) ApplyBiDiffSelection(folder string, device protocol.DeviceID, di
 }
 
 func (m *model) ApplyPeerDiffSelection(folder string, device protocol.DeviceID, direction string, files []string) error {
+	files, err := m.expandBiDiffSelectionWithRename(folder, device, files, true)
+	if err != nil {
+		return err
+	}
+	m.clearPeerApplyResults(device, folder, direction, files)
 	switch direction {
 	case BiDiffDirectionLeftToRight:
 		return m.sendPeerApply(folder, device, files)
@@ -367,6 +386,71 @@ func (m *model) ApplyPeerDiffSelection(folder string, device protocol.DeviceID, 
 	default:
 		return errGeneric{"invalid peerdiff direction"}
 	}
+}
+
+func uniquePaths(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	return out
+}
+
+func expandSelectionWithCompareRename(entries []CompareEntry, files []string) []string {
+	selected := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		selected[file] = struct{}{}
+	}
+	for _, entry := range entries {
+		if entry.RenameCandidate == "" {
+			continue
+		}
+		if _, ok := selected[entry.Path]; ok {
+			selected[entry.RenameCandidate] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(selected))
+	for path := range selected {
+		out = append(out, path)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func (m *model) expandBiDiffSelectionWithRename(folder string, device protocol.DeviceID, files []string, usePreview bool) ([]string, error) {
+	files = uniquePaths(files)
+	if len(files) == 0 {
+		return files, nil
+	}
+
+	leftFiles, err := m.collectCompareFiles(folder, protocol.LocalDeviceID, "")
+	if err != nil {
+		return nil, err
+	}
+	rightFiles, err := m.collectCompareFiles(folder, device, "")
+	if err != nil {
+		return nil, err
+	}
+	m.mut.RLock()
+	cfg, ok := m.folderCfgs[folder]
+	m.mut.RUnlock()
+	if !ok {
+		return nil, ErrFolderMissing
+	}
+	if usePreview {
+		if snapshot, ok := m.previewSnapshot(folder, device); ok {
+			for path, fi := range snapshot.Files {
+				rightFiles[path] = fi
+			}
+		}
+	}
+	entries := buildCompareEntries(leftFiles, rightFiles, cfg.ModTimeWindow())
+	return expandSelectionWithCompareRename(entries, files), nil
 }
 
 func (m *model) applyRemoteSideSelected(folder string, device protocol.DeviceID, files []string) error {
@@ -397,6 +481,8 @@ func (m *model) applyRemoteSideSelectedWithPolicy(folder string, device protocol
 	previewSnapshot, hasPreview := m.previewSnapshot(folder, device)
 
 	selected := make([]string, 0, len(files))
+	remoteUpdates := make([]protocol.FileInfo, 0, len(files))
+	prepared := make([]preparedRemoteApplyEntry, 0, len(files))
 	updates := make([]protocol.FileInfo, 0, len(files))
 	updatedNames := make([]string, 0, len(files))
 	rescanPaths := make([]string, 0, len(files))
@@ -440,21 +526,53 @@ func (m *model) applyRemoteSideSelectedWithPolicy(folder string, device protocol
 		if !canApply {
 			continue
 		}
-		if (entry.Status == "only-local" || entry.Status == "deleted-remote") && localOK && !local.IsDeleted() {
-			if err := deleteLocalForRemoteAbsence(filesystem, local); err != nil && !stfs.IsNotExist(err) {
-				return err
-			}
-			rescanPaths = append(rescanPaths, file)
+		prepared = append(prepared, preparedRemoteApplyEntry{
+			path:     file,
+			status:   entry.Status,
+			local:    local,
+			localOK:  localOK,
+			remote:   remote,
+			remoteOK: remoteOK,
+		})
+		if usePreview && remoteOK {
+			remoteCopy := remote
+			remoteCopy.LocalFlags = 0
+			remoteUpdates = append(remoteUpdates, remoteCopy)
+		}
+	}
+
+	handledByRename, renameRescans, err := applyRemoteRenameShortcuts(filesystem, prepared)
+	if err != nil {
+		return err
+	}
+	if len(renameRescans) > 0 {
+		rescanPaths = append(rescanPaths, renameRescans...)
+	}
+
+	if len(handledByRename) > 0 {
+		selected = selected[:0]
+	}
+
+	for _, entry := range prepared {
+		if _, ok := handledByRename[entry.path]; ok {
 			continue
 		}
-		if localOK && shouldForceRemoteAdoption(entry.Status) {
+		if (entry.status == "only-local" || entry.status == "deleted-remote") && entry.localOK && !entry.local.IsDeleted() {
+			if err := deleteLocalForRemoteAbsence(filesystem, entry.local); err != nil && !stfs.IsNotExist(err) {
+				return err
+			}
+			rescanPaths = append(rescanPaths, entry.path)
+			continue
+		}
+		if entry.localOK && shouldForceRemoteAdoption(entry.status) {
+			local := entry.local
 			local.LocalFlags &^= (protocol.FlagLocalReceiveOnly | protocol.FlagLocalManualPublish)
 			local.Version = protocol.Vector{}
 			local.Sequence = 0
 			updates = append(updates, local)
 			updatedNames = append(updatedNames, local.Name)
 		}
-		selected = append(selected, file)
+		selected = append(selected, entry.path)
 	}
 
 	if len(updates) > 0 {
@@ -476,6 +594,23 @@ func (m *model) applyRemoteSideSelectedWithPolicy(folder string, device protocol
 		})
 	}
 
+	if len(remoteUpdates) > 0 {
+		if err := m.sdb.Update(folder, device, remoteUpdates); err != nil {
+			return err
+		}
+		seq, err := m.sdb.GetDeviceSequence(folder, device)
+		if err != nil {
+			return err
+		}
+		m.evLogger.Log(events.RemoteIndexUpdated, map[string]interface{}{
+			"device":   device.String(),
+			"folder":   folder,
+			"items":    len(remoteUpdates),
+			"sequence": seq,
+			"version":  seq,
+		})
+	}
+
 	if len(rescanPaths) > 0 {
 		if err := m.ScanFolderSubdirs(folder, rescanPaths); err != nil {
 			return err
@@ -486,6 +621,76 @@ func (m *model) applyRemoteSideSelectedWithPolicy(folder string, device protocol
 		return nil
 	}
 	return m.TriggerFolderPullSelected(folder, selected)
+}
+
+func applyRemoteRenameShortcuts(filesystem stfs.Filesystem, prepared []preparedRemoteApplyEntry) (map[string]struct{}, []string, error) {
+	type ref struct {
+		index int
+		path  string
+	}
+
+	sourceByHash := make(map[string][]ref)
+	destByHash := make(map[string][]ref)
+	handled := make(map[string]struct{})
+	rescan := make([]string, 0, len(prepared))
+
+	for i, entry := range prepared {
+		switch entry.status {
+		case "deleted-remote", "only-local":
+			if entry.localOK && !entry.local.IsDeleted() && len(entry.local.BlocksHash) > 0 {
+				sourceByHash[string(entry.local.BlocksHash)] = append(sourceByHash[string(entry.local.BlocksHash)], ref{index: i, path: entry.path})
+			}
+		case "only-remote", "deleted-local":
+			if entry.remoteOK && !entry.remote.IsDeleted() && len(entry.remote.BlocksHash) > 0 {
+				destByHash[string(entry.remote.BlocksHash)] = append(destByHash[string(entry.remote.BlocksHash)], ref{index: i, path: entry.path})
+			}
+		}
+	}
+
+	for hash, sources := range sourceByHash {
+		dests, ok := destByHash[hash]
+		if !ok {
+			continue
+		}
+		slices.SortFunc(sources, func(a, b ref) int { return strings.Compare(a.path, b.path) })
+		slices.SortFunc(dests, func(a, b ref) int { return strings.Compare(a.path, b.path) })
+
+		limit := min(len(sources), len(dests))
+		for i := 0; i < limit; i++ {
+			src := prepared[sources[i].index]
+			dst := prepared[dests[i].index]
+			if !sameSizedBlocks(&src.local, &dst.remote) {
+				continue
+			}
+			if src.path == dst.path {
+				continue
+			}
+			if _, ok := handled[src.path]; ok {
+				continue
+			}
+			if _, ok := handled[dst.path]; ok {
+				continue
+			}
+			if parent := path.Dir(dst.path); parent != "." && parent != "" {
+				if err := filesystem.MkdirAll(parent, 0o755); err != nil {
+					return nil, nil, err
+				}
+			}
+			if _, err := filesystem.Lstat(dst.path); err == nil {
+				continue
+			} else if !stfs.IsNotExist(err) {
+				return nil, nil, err
+			}
+			if err := filesystem.Rename(src.path, dst.path); err != nil {
+				continue
+			}
+			handled[src.path] = struct{}{}
+			handled[dst.path] = struct{}{}
+			rescan = append(rescan, src.path, dst.path)
+		}
+	}
+
+	return handled, rescan, nil
 }
 
 func deleteLocalForRemoteAbsence(filesystem stfs.Filesystem, local protocol.FileInfo) error {

@@ -4103,6 +4103,15 @@ func (fake *Model) PendingPublishFolderFiles(arg1 string, arg2 model.PendingPubl
 	return model.PendingPublishResult{}, nil
 }
 
+func (fake *Model) ClearSettledPendingPublishSelected(arg1 string, arg2 []string) error {
+	var copied []string
+	if arg2 != nil {
+		copied = append([]string(nil), arg2...)
+	}
+	fake.recordInvocation("ClearSettledPendingPublishSelected", []interface{}{arg1, copied})
+	return nil
+}
+
 func (fake *Model) PreviewIndexFolderFiles(arg1 string, arg2 protocol.DeviceID, arg3 model.PreviewIndexOptions) (model.PreviewIndexResult, error) {
 	fake.recordInvocation("PreviewIndexFolderFiles", []interface{}{arg1, arg2, arg3})
 	return model.PreviewIndexResult{}, nil

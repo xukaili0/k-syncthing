@@ -58,7 +58,7 @@ func (m *model) PreviewIndexFolderFiles(folder string, device protocol.DeviceID,
 		return PreviewIndexResult{}, err
 	}
 
-	pending := buildPendingPublishEntries(m, folder, localFiles)
+	pending := buildPendingPublishEntries(m, folder, localFiles, cfg.ModTimeWindow())
 	total := len(pending)
 
 	start := (opts.Page - 1) * opts.PerPage

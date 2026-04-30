@@ -135,6 +135,7 @@ func (m *model) sendPeerApplyResults(folder string, device protocol.DeviceID, en
 
 func (m *model) buildPeerApplyPayload(folder string, device protocol.DeviceID, files []string) ([]protocol.FileInfo, error) {
 	payload := make([]protocol.FileInfo, 0, len(files))
+	previewSnapshot, hasPreview := m.previewSnapshot(folder, device)
 	seen := make(map[string]struct{}, len(files))
 	for _, file := range files {
 		if _, ok := seen[file]; ok {
@@ -150,9 +151,19 @@ func (m *model) buildPeerApplyPayload(folder string, device protocol.DeviceID, f
 		if err != nil {
 			return nil, err
 		}
-		remote, remoteOK, err := m.sdb.GetDeviceFile(folder, device, file)
-		if err != nil {
-			return nil, err
+		var remote protocol.FileInfo
+		var remoteOK bool
+		if hasPreview {
+			if previewRemote, ok := previewSnapshot.Files[file]; ok {
+				remote = previewRemote
+				remoteOK = true
+			}
+		}
+		if !remoteOK {
+			remote, remoteOK, err = m.sdb.GetDeviceFile(folder, device, file)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		fi, ok := preparePeerApplyFileInfo(m.shortID, localOK, local, globalOK, global, remoteOK, remote)
@@ -344,6 +355,31 @@ func (m *model) recordPeerApplyResults(device protocol.DeviceID, folder string, 
 	for _, result := range results {
 		key := result.Direction + "\x00" + result.Path
 		m.peerApplyResults[device][folder][key] = result
+	}
+}
+
+func (m *model) clearPeerApplyResults(device protocol.DeviceID, folder, direction string, paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	m.mut.Lock()
+	defer m.mut.Unlock()
+	folders, ok := m.peerApplyResults[device]
+	if !ok {
+		return
+	}
+	items, ok := folders[folder]
+	if !ok {
+		return
+	}
+	for _, path := range paths {
+		delete(items, direction+"\x00"+path)
+	}
+	if len(items) == 0 {
+		delete(folders, folder)
+	}
+	if len(folders) == 0 {
+		delete(m.peerApplyResults, device)
 	}
 }
 

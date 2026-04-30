@@ -113,6 +113,7 @@ type Model interface {
 	RemoteNeedFolderFiles(folder string, device protocol.DeviceID, page, perpage int) ([]protocol.FileInfo, error)
 	LocalChangedFolderFiles(folder string, page, perpage int) ([]protocol.FileInfo, error)
 	PendingPublishFolderFiles(folder string, opts PendingPublishOptions) (PendingPublishResult, error)
+	ClearSettledPendingPublishSelected(folder string, files []string) error
 	PreviewIndexFolderFiles(folder string, device protocol.DeviceID, opts PreviewIndexOptions) (PreviewIndexResult, error)
 	CompareFolderFiles(folder string, device protocol.DeviceID, opts CompareOptions) (CompareResult, error)
 	BiDiffFolderFiles(folder string, device protocol.DeviceID, opts BiDiffOptions) (BiDiffResult, error)
