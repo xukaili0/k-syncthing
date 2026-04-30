@@ -145,6 +145,10 @@ button:disabled {
   grid-template-columns: 280px minmax(0, 1fr);
 }
 
+.workspace-shell.ui-mode-mobile {
+  grid-template-columns: 1fr;
+}
+
 .workspace-sidebar {
   padding: 12px;
   border-right: 1px solid rgba(18, 35, 45, 0.08);
@@ -155,11 +159,31 @@ button:disabled {
   overflow-y: auto;
 }
 
+.workspace-shell.ui-mode-mobile .workspace-sidebar {
+  border-right: 0;
+  border-bottom: 1px solid rgba(18, 35, 45, 0.08);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px;
+  overflow: visible;
+}
+
+.workspace-shell.ui-mode-mobile .brand-block,
+.workspace-shell.ui-mode-mobile .local-device-section,
+.workspace-shell.ui-mode-mobile .device-list,
+.workspace-shell.ui-mode-mobile .folder-list,
+.workspace-shell.ui-mode-mobile .settings-panel {
+  grid-column: 1 / -1;
+}
+
 .workspace-main {
   padding: 16px 20px;
   display: grid;
   gap: 12px;
   align-content: start;
+}
+
+.workspace-shell.ui-mode-mobile .workspace-main {
+  padding: 12px;
 }
 
 .modal-backdrop {
@@ -183,6 +207,12 @@ button:disabled {
   background: var(--surface);
   border: 1px solid rgba(255, 255, 255, 0.6);
   box-shadow: 0 32px 80px rgba(20, 35, 46, 0.2);
+}
+
+.workspace-shell.ui-mode-mobile .modal-shell {
+  width: min(100vw, 100vw);
+  height: min(100vh, 100vh);
+  border-radius: 0;
 }
 
 .modal-header {
@@ -505,11 +535,20 @@ button:disabled {
   box-shadow: var(--shadow);
 }
 
+.workspace-shell.ui-mode-mobile .topbar {
+  padding: 10px 12px;
+}
+
 .topbar-actions,
 .panel-actions {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.workspace-shell.ui-mode-mobile .topbar-actions {
+  width: 100%;
+  justify-content: flex-start;
 }
 
 .compact-actions {
@@ -1182,6 +1221,37 @@ button:disabled {
   width: 18px;
   height: 18px;
   cursor: pointer;
+}
+
+.compare-checkbox-native {
+  width: 20px;
+  height: 20px;
+  accent-color: #0d6f68;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: rgba(13, 111, 104, 0.08);
+}
+
+.compare-checkbox-wrap {
+  position: relative;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  touch-action: manipulation;
+  cursor: pointer;
+}
+
+.compare-checkbox-cell {
+  position: relative;
+  z-index: 2;
+  text-align: center;
+}
+
+.compare-checkbox-hit {
+  position: absolute;
+  inset: 0;
 }
 
 .compare-status-cell {
@@ -1954,6 +2024,20 @@ button:disabled {
   font-size: 0.82rem;
 }
 
+.review-native-checkbox-debug {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.review-native-checkbox-debug input {
+  width: 18px;
+  height: 18px;
+  accent-color: #0d6f68;
+}
+
 .review-inline-select select {
   width: auto;
   min-width: 88px;
@@ -2089,8 +2173,87 @@ button:disabled {
   background: rgba(255, 255, 255, 0.6);
 }
 
+.bidiff-mobile-list {
+  display: grid;
+  gap: 8px;
+}
+
+.bidiff-mobile-dir {
+  border: 1px solid rgba(18, 35, 45, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.6);
+  padding: 8px 10px;
+}
+
+.bidiff-mobile-dir.contains-selected {
+  border-color: rgba(13, 111, 104, 0.3);
+  background: rgba(13, 111, 104, 0.06);
+}
+
+.bidiff-mobile-dir-head {
+  display: grid;
+  grid-template-columns: 32px 18px 18px minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+}
+
+.bidiff-mobile-dir-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.bidiff-mobile-dir-meta strong {
+  font-size: var(--bidiff-path-size, 0.88rem);
+  color: #7d4d00;
+}
+
+.bidiff-mobile-dir-meta span {
+  font-size: var(--bidiff-meta-size, 0.74rem);
+  color: var(--muted);
+}
+
+.bidiff-mobile-card-main {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.bidiff-mobile-card-center {
+  order: -1;
+}
+
+.compare-card-side-title {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.compare-card-side-metrics {
+  display: grid;
+  gap: 2px;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.compare-card-side-metrics span:first-child {
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.compare-card-side-metrics span:last-child {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
 .compare-card.selected {
   outline: 2px solid rgba(13, 111, 104, 0.3);
+}
+
+.compare-card.selectable,
+.compare-tree-file-row.selectable {
+  cursor: pointer;
 }
 
 .compare-card.tone-success { border-color: rgba(19, 121, 91, 0.22); }
