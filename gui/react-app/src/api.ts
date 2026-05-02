@@ -4,6 +4,27 @@ export type FolderDevice = {
   encryptionPassword?: string;
 };
 
+export type FolderVersioning = {
+  type?: string;
+  cleanupIntervalS?: number;
+  fsPath?: string;
+  params?: Record<string, string>;
+};
+
+export type MinDiskFree = {
+  value?: number;
+  unit?: "%" | "kB" | "MB" | "GB" | "TB";
+};
+
+export type GuiVersioningDraft = {
+  selector: string;
+  trashcanClean: number;
+  cleanupIntervalS: number;
+  simpleKeep: number;
+  staggeredMaxAge: number;
+  externalCommand: string;
+};
+
 export type FolderConfig = {
   id: string;
   label?: string;
@@ -19,9 +40,21 @@ export type FolderConfig = {
   order?: string;
   maxConflicts?: number;
   scanProgressIntervalS?: number;
+  minDiskFree?: MinDiskFree;
   manualSync?: boolean;
   manualPublish?: boolean;
+  typeDescription?: string;
+  versioning?: FolderVersioning;
+  syncOwnership?: boolean;
+  sendOwnership?: boolean;
+  syncXattrs?: boolean;
+  sendXattrs?: boolean;
+  junctionsAsDirs?: boolean;
+  copyOwnershipFromParent?: boolean;
+  fsWatcherDelayS?: number;
   devices: FolderDevice[];
+  _guiVersioning?: GuiVersioningDraft;
+  _addIgnores?: boolean;
 };
 
 export type DeviceConfig = {
@@ -32,6 +65,7 @@ export type DeviceConfig = {
   certName?: string;
   introducer?: boolean;
   skipIntroductionRemovals?: boolean;
+  introducedBy?: string;
   paused?: boolean;
   allowedNetworks?: string[];
   autoAcceptFolders?: boolean;
@@ -72,6 +106,11 @@ export type DeviceConnection = {
   connected: boolean;
   address?: string;
   type?: string;
+  paused?: boolean;
+  clientVersion?: string;
+  crypto?: string;
+  isLocal?: boolean;
+  startedAt?: string;
   inBytesTotal: number;
   outBytesTotal: number;
   inbps?: number;
@@ -84,6 +123,11 @@ export type ConnectionsResponse = {
     outBytesTotal: number;
   };
   connections: Record<string, DeviceConnection>;
+};
+
+export type DeviceStatistics = {
+  lastSeen: string;
+  lastConnectionDurationS?: number;
 };
 
 export type FolderStatus = {
@@ -220,6 +264,26 @@ export type OptionsConfig = {
   connectionLimitEnough?: number;
   connectionLimitMax?: number;
 };
+
+export type IgnoreResponse = {
+  ignore: string[];
+  expanded?: string[];
+  error?: string | null;
+};
+
+export type PendingFolderObserved = {
+  time: string;
+  label: string;
+  receiveEncrypted?: boolean;
+  remoteEncrypted?: boolean;
+};
+
+export type PendingFoldersResponse = Record<
+  string,
+  {
+    offeredBy: Record<string, PendingFolderObserved>;
+  }
+>;
 
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {

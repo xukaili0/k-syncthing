@@ -7,10 +7,14 @@ import {
   CompletionStatus,
   ConfigResponse,
   ConnectionsResponse,
+  DeviceConnection,
   DeviceConfig,
+  DeviceStatistics,
   FolderConfig,
   FolderStatus,
+  IgnoreResponse,
   OptionsConfig,
+  PendingFoldersResponse,
   PendingPublishEntry,
   PendingPublishResult,
   SystemStatus,
@@ -50,6 +54,7 @@ const compareViewOptions = [
 const bidiffViewOptions = [
   { value: "different", label: "仅看待裁决差异" },
   { value: "all", label: "显示全部有效条目" },
+  { value: "all-with-same", label: "显示全部（含相同）" },
   { value: "delete", label: "仅看删除 / 缺失" },
   { value: "modified", label: "仅看内容变化" },
   { value: "conflict", label: "仅看冲突" },
@@ -194,6 +199,17 @@ function formatDate(value?: string, mode: "full" | "compact" = "full"): string {
   });
 }
 
+function formatLastSeen(value?: string): string {
+  if (!value) {
+    return "-";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date.getTime() === 0) {
+    return "从未";
+  }
+  return formatDate(value, "full");
+}
+
 function folderLabel(folder: FolderConfig): string {
   return folder.label && folder.label.trim().length > 0 ? folder.label : folder.id;
 }
@@ -203,6 +219,67 @@ function deviceName(device: DeviceConfig | undefined): string {
     return "未知设备";
   }
   return device.name && device.name.trim().length > 0 ? device.name : device.deviceID.slice(0, 7);
+}
+
+function normalizeAddress(value: string): string {
+  return value.replace(/\/\?.*$/, "");
+}
+
+function compressionLabel(value?: string): string {
+  switch (value) {
+    case "metadata":
+      return "仅元数据";
+    case "always":
+      return "全部数据";
+    case "never":
+      return "关闭";
+    default:
+      return value || "-";
+  }
+}
+
+function aggregateDeviceCompletion(completionMap?: Record<string, CompletionStatus>): {
+  total: number;
+  needBytes: number;
+  needItems: number;
+  remoteState?: string;
+} {
+  if (!completionMap) {
+    return { total: 0, needBytes: 0, needItems: 0, remoteState: undefined };
+  }
+
+  let totalBytes = 0;
+  let neededBytes = 0;
+  let items = 0;
+  let deletes = 0;
+  let remoteState: string | undefined;
+
+  for (const completion of Object.values(completionMap)) {
+    totalBytes += completion.globalBytes ?? 0;
+    neededBytes += completion.needBytes ?? 0;
+    items += completion.needItems ?? 0;
+    deletes += completion.needDeletes ?? 0;
+    if (!remoteState || remoteState === "idle") {
+      remoteState = completion.remoteState;
+    } else if (completion.remoteState === "syncing" || completion.remoteState === "scanning") {
+      remoteState = completion.remoteState;
+    }
+  }
+
+  let total = 100;
+  if (totalBytes > 0) {
+    total = Math.floor(100 * (1 - neededBytes / totalBytes));
+  }
+  if (neededBytes === 0 && items + deletes > 0) {
+    total = 95;
+  }
+
+  return {
+    total,
+    needBytes: neededBytes,
+    needItems: items + deletes,
+    remoteState,
+  };
 }
 
 function folderTypeLabel(type: string): string {
@@ -228,6 +305,41 @@ function canPublish(folder: FolderConfig): boolean {
   return folder.type !== "receiveonly" && folder.type !== "receiveencrypted";
 }
 
+function isPausedFolder(folder: FolderConfig | null | undefined): boolean {
+  return Boolean(folder?.paused);
+}
+
+function pausedFolderStatus(): FolderStatus {
+  return {
+    state: "paused",
+    localFiles: 0,
+    localDirectories: 0,
+    localBytes: 0,
+    globalFiles: 0,
+    globalDirectories: 0,
+    globalBytes: 0,
+    needTotalItems: 0,
+    needBytes: 0,
+    errors: 0,
+    receiveOnlyTotalItems: 0,
+  };
+}
+
+function pausedCompletionStatus(): CompletionStatus {
+  return {
+    completion: 100,
+    globalBytes: 0,
+    needBytes: 0,
+    needItems: 0,
+    needDeletes: 0,
+    remoteState: "paused",
+  };
+}
+
+function isFolderPausedError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("folder is paused");
+}
+
 function receiveModeLabel(folder: FolderConfig): string {
   if (!canReceive(folder)) {
     return "不接收";
@@ -240,6 +352,135 @@ function publishModeLabel(folder: FolderConfig): string {
     return "不发布";
   }
   return folder.manualPublish ? "手动审核发布" : "自动发布";
+}
+
+function createDefaultGuiVersioning() {
+  return {
+    selector: "none" as FolderVersioningSelector,
+    trashcanClean: 0,
+    cleanupIntervalS: 3600,
+    simpleKeep: 5,
+    staggeredMaxAge: 365,
+    externalCommand: "",
+  };
+}
+
+function createGuiVersioningFromFolder(folder: FolderConfig) {
+  const defaults = createDefaultGuiVersioning();
+  const versioning = folder.versioning;
+  if (!versioning?.type || versioning.type === "none") {
+    return defaults;
+  }
+
+  const next = {
+    ...defaults,
+    selector: versioning.type as FolderVersioningSelector,
+    cleanupIntervalS: Number(versioning.cleanupIntervalS ?? defaults.cleanupIntervalS) || defaults.cleanupIntervalS,
+  };
+
+  switch (versioning.type) {
+    case "trashcan":
+      next.trashcanClean = Number(versioning.params?.cleanoutDays ?? defaults.trashcanClean) || 0;
+      break;
+    case "simple":
+      next.simpleKeep = Number(versioning.params?.keep ?? defaults.simpleKeep) || defaults.simpleKeep;
+      next.trashcanClean = Number(versioning.params?.cleanoutDays ?? defaults.trashcanClean) || 0;
+      break;
+    case "staggered":
+      next.staggeredMaxAge = Math.floor(Number(versioning.params?.maxAge ?? defaults.staggeredMaxAge * 86400) / 86400) || defaults.staggeredMaxAge;
+      break;
+    case "external":
+      next.externalCommand = versioning.params?.command ?? defaults.externalCommand;
+      break;
+  }
+
+  return next;
+}
+
+function prepareFolderDraft(folder: FolderConfig): FolderConfig {
+  const next = cloneJSON(folder);
+  next.minDiskFree = {
+    value: next.minDiskFree?.value ?? 1,
+    unit: next.minDiskFree?.unit ?? "%",
+  };
+  next.versioning = next.versioning ?? { type: "" };
+  next._guiVersioning = createGuiVersioningFromFolder(next);
+  next._addIgnores = false;
+  return next;
+}
+
+function buildFolderPayload(folder: FolderConfig): FolderConfig {
+  const payload = cloneJSON(folder);
+  if (!canReceive(payload)) {
+    payload.manualSync = false;
+  }
+  if (!canPublish(payload)) {
+    payload.manualPublish = false;
+  }
+
+  const guiVersioning = payload._guiVersioning ?? createDefaultGuiVersioning();
+  const versioning: NonNullable<FolderConfig["versioning"]> = {
+    type: guiVersioning.selector === "none" ? "" : guiVersioning.selector,
+    cleanupIntervalS: guiVersioning.cleanupIntervalS,
+    fsPath: payload.versioning?.fsPath ?? "",
+    params: {},
+  };
+
+  switch (guiVersioning.selector) {
+    case "trashcan":
+      versioning.params = { cleanoutDays: String(guiVersioning.trashcanClean) };
+      break;
+    case "simple":
+      versioning.params = {
+        keep: String(guiVersioning.simpleKeep),
+        cleanoutDays: String(guiVersioning.trashcanClean),
+      };
+      break;
+    case "staggered":
+      versioning.params = { maxAge: String(guiVersioning.staggeredMaxAge * 86400) };
+      break;
+    case "external":
+      versioning.params = { command: guiVersioning.externalCommand };
+      break;
+    default:
+      versioning.cleanupIntervalS = undefined;
+      versioning.fsPath = "";
+      versioning.params = {};
+  }
+
+  payload.versioning = versioning;
+  delete payload._guiVersioning;
+  delete payload._addIgnores;
+  return payload;
+}
+
+function normalizeIgnoreText(value: string): string {
+  return value.replace(/\r\n/g, "\n");
+}
+
+function completionRemoteStateLabel(remoteState?: string): string {
+  switch (remoteState) {
+    case "paused":
+      return "远端已暂停";
+    case "notSharing":
+      return "远端尚未接受共享";
+    case "idle":
+      return "远端空闲";
+    case "syncing":
+      return "远端同步中";
+    case "scanning":
+      return "远端扫描中";
+    default:
+      return "";
+  }
+}
+
+function pendingFolderOfferDevices(pending: PendingFoldersResponse[string], devicesById: Map<string, DeviceConfig>) {
+  return Object.entries(pending.offeredBy).map(([deviceID, observed]) => ({
+    deviceID,
+    observed,
+    device: devicesById.get(deviceID),
+  }));
 }
 
 function folderStateTone(status?: FolderStatus): "success" | "warning" | "danger" | "muted" {
@@ -365,6 +606,26 @@ function remoteStateLabel(value?: string): string {
   }
 }
 
+function aggregateSyncStatusLabel(summary: { total: number; needItems: number; remoteState?: string }): string {
+  if (summary.remoteState === "syncing") {
+    return `同步中 (${summary.total}%)`;
+  }
+  if (summary.remoteState === "scanning") {
+    return `扫描中 (${summary.total}%)`;
+  }
+  if (summary.needItems > 0) {
+    return `未同步 (${summary.total}%)`;
+  }
+  if (summary.total >= 100) {
+    return "已同步";
+  }
+  return `${remoteStateLabel(summary.remoteState)} (${summary.total}%)`;
+}
+
+function yesNo(value?: boolean): string {
+  return value ? "是" : "否";
+}
+
 function fileTypeLabel(value?: string): string {
   switch (value) {
     case "FILE_INFO_TYPE_FILE":
@@ -480,7 +741,20 @@ function filterReceiveEntriesForView(entries: CompareEntry[], view: string): Com
   if (view !== "incoming") {
     return entries;
   }
-  return entries.filter((entry) => entry.status !== "only-local" && entry.status !== "deleted-local");
+  return entries.filter(
+    (entry) =>
+      entry.status !== "same" &&
+      entry.status !== "only-local" &&
+      entry.status !== "deleted-local",
+  );
+}
+
+function compareRequestView(view: string): string {
+  return view === "incoming" ? "different" : view;
+}
+
+function bidiffRequestView(view: string): string {
+  return view === "all-with-same" ? "all" : view;
 }
 
 function bidiffStatusLabel(entry: BiDiffEntry): string {
@@ -661,6 +935,20 @@ function bidiffActionabilityLabel(entry: BiDiffEntry): { label: string; classNam
   return { label: "⛔", className: "action-blocked", title: "当前不可裁决" };
 }
 
+function bidiffRenameInlineText(entry: BiDiffEntry, baseLabel: string): string {
+  if (!entry.renameCandidate) {
+    return baseLabel;
+  }
+  const role = bidiffRenameRole(entry);
+  if (role === "new") {
+    return `${baseLabel}（旧：${entry.renameCandidate}）`;
+  }
+  if (role === "old") {
+    return `${baseLabel}（新：${entry.renameCandidate}）`;
+  }
+  return `${baseLabel}（${entry.renameCandidate}）`;
+}
+
 type BiDiffTaskStatus = "queued" | "submitted" | "processing" | "completed" | "failed";
 
 type BiDiffTask = {
@@ -673,6 +961,8 @@ type BiDiffTask = {
   error?: string;
   updatedAt: number;
 };
+
+type TaskPanelTab = "running" | "done";
 
 type BiDiffTreeNode = {
   key: string;
@@ -1082,6 +1372,16 @@ type ColumnDef = {
 
 type BiDiffDensity = "relaxed" | "normal" | "compact" | "tight";
 
+type DeviceShareDraft = {
+  selected: Record<string, boolean>;
+  encryptionPasswords: Record<string, string>;
+};
+
+type FolderEditorTab = "general" | "sharing" | "versioning" | "ignores" | "advanced";
+type DeviceEditorTab = "general" | "sharing" | "advanced";
+
+type FolderVersioningSelector = "none" | "trashcan" | "simple" | "staggered" | "external";
+
 function biDiffColumnsForDensity(density: BiDiffDensity, actionVisible = false): ColumnDef[] {
   const presets: Record<BiDiffDensity, Record<string, number>> = {
     relaxed: { checkbox: 52, leftSize: 104, leftTime: 118, action: 72, summary: 376, rightTime: 118, rightSize: 104 },
@@ -1137,10 +1437,11 @@ function ResizableTable(props: {
   children: ReactNode;
   className?: string;
   style?: CSSProperties;
+  wrapperRef?: React.RefObject<HTMLDivElement | null>;
 }) {
   const visibleColumns = props.columns.filter((col) => col.visible !== false);
   return (
-    <div className={`compare-table-wrapper${props.className ? ` ${props.className}` : ""}`} style={props.style}>
+    <div ref={props.wrapperRef} className={`compare-table-wrapper${props.className ? ` ${props.className}` : ""}`} style={props.style}>
       <table className="compare-table">
         <colgroup>
           {visibleColumns.map((col) => (
@@ -1153,11 +1454,15 @@ function ResizableTable(props: {
   );
 }
 
-function renderResizableHeaders(columns: ColumnDef[], onColumnsChange: (columns: ColumnDef[]) => void) {
+function renderResizableHeaders(
+  columns: ColumnDef[],
+  onColumnsChange: (columns: ColumnDef[]) => void,
+  customLabels?: Partial<Record<string, ReactNode>>,
+) {
   const visibleColumns = columns.filter((col) => col.visible !== false);
   return visibleColumns.map((col) => (
     <th key={col.key}>
-      {col.label}
+      {customLabels?.[col.key] ?? col.label}
       {col.key !== "checkbox" && (
         <div
           className="resize-handle"
@@ -1207,16 +1512,6 @@ function FileVersionCell(props: {
       </div>
     </div>
   );
-}
-
-function peerWorkbenchDetailText(result: BiDiffResult | null): string {
-  if (!result) {
-    return "这是独立的对等差异工作台。它的差异显示不再以“手动接收/手动发布是否开启”作为查看门槛。";
-  }
-  const previewText = result.remotePreviewAvailable
-    ? "当前已经收到远端预览索引，所以对端未正式发布的变化也会进入对比。"
-    : "当前还没收到远端预览索引，因此右侧仍可能只是对端最后一次已知正式索引。";
-  return `这是独立的对等差异工作台。它的差异显示不再以“手动接收/手动发布是否开启”作为查看门槛；当前设备未正式发布 ${result.localPendingItems ?? 0} 项。${previewText}不过“采用左侧”最终要不要在右侧真正落盘，仍然取决于后续显式应用链路，当前版本还没有完全绕开远端自身接收策略。`;
 }
 
 function BiDiffSizeCell(props: {
@@ -1383,6 +1678,7 @@ function App() {
   const [connections, setConnections] = useState<ConnectionsResponse | null>(null);
   const [folderStatuses, setFolderStatuses] = useState<Record<string, FolderStatus>>({});
   const [completions, setCompletions] = useState<Record<string, Record<string, CompletionStatus>>>({});
+  const [deviceStats, setDeviceStats] = useState<Record<string, DeviceStatistics>>({});
   const [selectedFolderId, setSelectedFolderId] = useState("");
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("overview");
@@ -1437,18 +1733,24 @@ function App() {
 
   const [folderEditorOpen, setFolderEditorOpen] = useState(false);
   const [folderDraft, setFolderDraft] = useState<FolderConfig | null>(null);
+  const [folderIgnoreText, setFolderIgnoreText] = useState("");
+  const [folderIgnoreError, setFolderIgnoreError] = useState("");
+  const [folderIgnoreBusy, setFolderIgnoreBusy] = useState(false);
+  const [folderAddIgnores, setFolderAddIgnores] = useState(false);
   const [folderSaveBusy, setFolderSaveBusy] = useState(false);
   const [folderSaveMessage, setFolderSaveMessage] = useState("");
   const [newFolderBusy, setNewFolderBusy] = useState(false);
 
   const [deviceEditorId, setDeviceEditorId] = useState("");
   const [deviceDraft, setDeviceDraft] = useState<DeviceConfig | null>(null);
+  const [deviceShareDraft, setDeviceShareDraft] = useState<DeviceShareDraft>({ selected: {}, encryptionPasswords: {} });
   const [deviceSaveBusy, setDeviceSaveBusy] = useState(false);
   const [deviceSaveMessage, setDeviceSaveMessage] = useState("");
   const [newDeviceBusy, setNewDeviceBusy] = useState(false);
 
   const [options, setOptions] = useState<OptionsConfig | null>(null);
   const [optionsDraft, setOptionsDraft] = useState<OptionsConfig | null>(null);
+  const [pendingFolders, setPendingFolders] = useState<PendingFoldersResponse>({});
   const [optionsSaveBusy, setOptionsSaveBusy] = useState(false);
   const [optionsSaveMessage, setOptionsSaveMessage] = useState("");
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
@@ -1456,6 +1758,7 @@ function App() {
   const [bidiffModalOpen, setBiDiffModalOpen] = useState(false);
   const [peerDiffModalOpen, setPeerDiffModalOpen] = useState(false);
   const [publishModalOpen, setPublishModalOpen] = useState(false);
+  const [titleBarStats, setTitleBarStats] = useState<{ total: number; selected: number; leftToRight: number; rightToLeft: number; pending?: number; previewReady?: boolean } | null>(null);
   const [systemActionBusy, setSystemActionBusy] = useState<"" | "restart" | "shutdown">("");
   const [systemActionMessage, setSystemActionMessage] = useState("");
 
@@ -1497,6 +1800,64 @@ function App() {
   const editingExistingFolder = Boolean(selectedFolder && folderDraft && folderDraft.id === selectedFolder.id);
   const editingNewFolder = Boolean(folderDraft && (!selectedFolder || folderDraft.id !== selectedFolder.id));
 
+  const buildDeviceShareDraft = useCallback(
+    (deviceID: string): DeviceShareDraft => {
+      const selected: Record<string, boolean> = {};
+      const encryptionPasswords: Record<string, string> = {};
+      for (const folder of folders) {
+        const folderDevice = (folder.devices ?? []).find((item) => item.deviceID === deviceID);
+        if (folderDevice) {
+          selected[folder.id] = true;
+          encryptionPasswords[folder.id] = folderDevice.encryptionPassword ?? "";
+        }
+      }
+      return { selected, encryptionPasswords };
+    },
+    [folders],
+  );
+
+  const syncDeviceFolderSharing = useCallback(
+    async (deviceID: string, sharingDraft: DeviceShareDraft, untrusted: boolean) => {
+      for (const folder of folders) {
+        const current = cloneJSON(folder);
+        const existingIndex = (current.devices ?? []).findIndex((item) => item.deviceID === deviceID);
+        const shouldShare = Boolean(sharingDraft.selected[folder.id]);
+        let changed = false;
+
+        if (shouldShare) {
+          const nextFolderDevice = {
+            deviceID,
+            ...(untrusted && sharingDraft.encryptionPasswords[folder.id]
+              ? { encryptionPassword: sharingDraft.encryptionPasswords[folder.id] }
+              : {}),
+          };
+          if (existingIndex === -1) {
+            current.devices = [...(current.devices ?? []), nextFolderDevice];
+            changed = true;
+          } else {
+            const existing = current.devices[existingIndex];
+            const nextPassword = nextFolderDevice.encryptionPassword ?? "";
+            const oldPassword = existing.encryptionPassword ?? "";
+            if (oldPassword !== nextPassword) {
+              current.devices = current.devices.map((item, index) =>
+                index === existingIndex ? { ...item, encryptionPassword: nextPassword || undefined } : item,
+              );
+              changed = true;
+            }
+          }
+        } else if (existingIndex !== -1) {
+          current.devices = current.devices.filter((item) => item.deviceID !== deviceID);
+          changed = true;
+        }
+
+        if (changed) {
+          await putJSON(`/rest/config/folders/${encodeURIComponent(folder.id)}`, current);
+        }
+      }
+    },
+    [folders],
+  );
+
   const loadBootstrap = useCallback(async () => {
     if (!authenticated) {
       return;
@@ -1504,27 +1865,49 @@ function App() {
     setBootBusy(true);
     setBootError("");
     try {
-      const [nextConfig, nextSystem, nextVersion, nextConnections] = await Promise.all([
+      const [nextConfig, nextSystem, nextVersion, nextConnections, nextDeviceStats, nextPendingFolders] = await Promise.all([
         getJSON<ConfigResponse>("/rest/config"),
         getJSON<SystemStatus>("/rest/system/status"),
         getJSON<VersionResponse>("/rest/system/version"),
         getJSON<ConnectionsResponse>("/rest/system/connections"),
+        getJSON<Record<string, DeviceStatistics>>("/rest/stats/device"),
+        getJSON<PendingFoldersResponse>("/rest/cluster/pending/folders"),
       ]);
 
       const statusEntries = await Promise.all(
         nextConfig.folders.map(async (folder) => {
-          const status = await getJSON<FolderStatus>(`/rest/db/status?folder=${encodeURIComponent(folder.id)}`);
-          return [folder.id, status] as const;
+          if (folder.paused) {
+            return [folder.id, pausedFolderStatus()] as const;
+          }
+          try {
+            const status = await getJSON<FolderStatus>(`/rest/db/status?folder=${encodeURIComponent(folder.id)}`);
+            return [folder.id, status] as const;
+          } catch (error) {
+            if (isFolderPausedError(error)) {
+              return [folder.id, pausedFolderStatus()] as const;
+            }
+            throw error;
+          }
         }),
       );
 
       const completionPairs = await Promise.all(
         nextConfig.folders.flatMap((folder) =>
           folder.devices.map(async (folderDevice) => {
-            const completion = await getJSON<CompletionStatus>(
-              `/rest/db/completion?device=${encodeURIComponent(folderDevice.deviceID)}&folder=${encodeURIComponent(folder.id)}`,
-            );
-            return [folderDevice.deviceID, folder.id, completion] as const;
+            if (folder.paused) {
+              return [folderDevice.deviceID, folder.id, pausedCompletionStatus()] as const;
+            }
+            try {
+              const completion = await getJSON<CompletionStatus>(
+                `/rest/db/completion?device=${encodeURIComponent(folderDevice.deviceID)}&folder=${encodeURIComponent(folder.id)}`,
+              );
+              return [folderDevice.deviceID, folder.id, completion] as const;
+            } catch (error) {
+              if (isFolderPausedError(error)) {
+                return [folderDevice.deviceID, folder.id, pausedCompletionStatus()] as const;
+              }
+              throw error;
+            }
           }),
         ),
       );
@@ -1542,6 +1925,8 @@ function App() {
       setSystem(nextSystem);
       setVersion(nextVersion);
       setConnections(nextConnections);
+      setDeviceStats(nextDeviceStats);
+      setPendingFolders(nextPendingFolders);
       setFolderStatuses(nextStatuses);
       setCompletions(nextCompletions);
 
@@ -1567,12 +1952,18 @@ function App() {
       setCompare(null);
       return;
     }
+    if (isPausedFolder(selectedFolder)) {
+      setCompare(null);
+      setCompareError("当前文件夹已暂停，请先恢复后再进行接收审核。");
+      return;
+    }
 
     setCompareBusy(true);
     setCompareError("");
     try {
+      const requestView = compareRequestView(compareView);
       const data = await getJSON<CompareResult>(
-        `/rest/db/compare?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(compareView)}&prefix=${encodeURIComponent(comparePrefix)}&page=1&perpage=500`,
+        `/rest/db/compare?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(comparePrefix)}&page=1&perpage=500`,
       );
       setCompare(data);
       setCompareSelection((previous) => {
@@ -1595,6 +1986,11 @@ function App() {
     if (!selectedFolder) {
       return;
     }
+    if (isPausedFolder(selectedFolder)) {
+      setCompare(null);
+      setCompareError("当前文件夹已暂停，请先恢复后再进行接收审核。");
+      return;
+    }
     if (rescanLocal) {
       setPanelScanBusy("compare");
       try {
@@ -1611,12 +2007,18 @@ function App() {
       setBiDiff(null);
       return;
     }
+    if (isPausedFolder(selectedFolder)) {
+      setBiDiff(null);
+      setBiDiffError("当前文件夹已暂停，请先恢复后再进行双向裁决。");
+      return;
+    }
 
     setBiDiffBusy(true);
     setBiDiffError("");
     try {
+      const requestView = bidiffRequestView(bidiffView);
       const data = await getJSON<BiDiffResult>(
-        `/rest/db/bidiff?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(bidiffView)}&prefix=${encodeURIComponent(bidiffPrefix)}&page=1&perpage=500`,
+        `/rest/db/bidiff?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(bidiffPrefix)}&page=1&perpage=500`,
       );
       setBiDiff(data);
       setBiDiffSelection((previous) => {
@@ -1639,6 +2041,11 @@ function App() {
     if (!selectedFolder) {
       return;
     }
+    if (isPausedFolder(selectedFolder)) {
+      setBiDiff(null);
+      setBiDiffError("当前文件夹已暂停，请先恢复后再进行双向裁决。");
+      return;
+    }
     if (rescanLocal) {
       setPanelScanBusy("bidiff");
       try {
@@ -1655,12 +2062,18 @@ function App() {
       setPeerDiff(null);
       return;
     }
+    if (isPausedFolder(selectedFolder)) {
+      setPeerDiff(null);
+      setPeerDiffError("当前文件夹已暂停，请先恢复后再查看对等差异。");
+      return;
+    }
 
     setPeerDiffBusy(true);
     setPeerDiffError("");
     try {
+      const requestView = bidiffRequestView(peerDiffView);
       const data = await getJSON<BiDiffResult>(
-        `/rest/db/peerdiff?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(peerDiffView)}&prefix=${encodeURIComponent(peerDiffPrefix)}&page=1&perpage=500`,
+        `/rest/db/peerdiff?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(peerDiffPrefix)}&page=1&perpage=500`,
       );
       setPeerDiff(data);
       setPeerDiffSelection((previous) => {
@@ -1683,6 +2096,11 @@ function App() {
     if (!selectedFolder) {
       return;
     }
+    if (isPausedFolder(selectedFolder)) {
+      setPeerDiff(null);
+      setPeerDiffError("当前文件夹已暂停，请先恢复后再查看对等差异。");
+      return;
+    }
     if (rescanLocal) {
       setPanelScanBusy("peerdiff");
       try {
@@ -1697,6 +2115,11 @@ function App() {
   const loadPublish = useCallback(async () => {
     if (!selectedFolder) {
       setPublish(null);
+      return;
+    }
+    if (isPausedFolder(selectedFolder)) {
+      setPublish(null);
+      setPublishError("当前文件夹已暂停，请先恢复后再进行发布审核。");
       return;
     }
 
@@ -1725,6 +2148,11 @@ function App() {
 
   const refreshPublish = useCallback(async (rescanLocal: boolean) => {
     if (!selectedFolder) {
+      return;
+    }
+    if (isPausedFolder(selectedFolder)) {
+      setPublish(null);
+      setPublishError("当前文件夹已暂停，请先恢复后再进行发布审核。");
       return;
     }
     if (rescanLocal) {
@@ -1978,6 +2406,15 @@ function App() {
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }, [bidiffTasks, selectedDeviceId, selectedFolder]);
 
+  const allBiDiffTasks = useMemo(() => {
+    if (!selectedFolder || !selectedDeviceId) {
+      return [];
+    }
+    return Object.values(bidiffTasks)
+      .filter((task) => task.folderId === selectedFolder.id && task.deviceId === selectedDeviceId)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  }, [bidiffTasks, selectedDeviceId, selectedFolder]);
+
   const activePeerDiffTasks = useMemo(() => {
     if (!selectedFolder || !selectedDeviceId) {
       return [];
@@ -1985,6 +2422,15 @@ function App() {
     return Object.values(peerDiffTasks)
       .filter((task) => task.folderId === selectedFolder.id && task.deviceId === selectedDeviceId)
       .filter((task) => task.status !== "completed")
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  }, [peerDiffTasks, selectedDeviceId, selectedFolder]);
+
+  const allPeerDiffTasks = useMemo(() => {
+    if (!selectedFolder || !selectedDeviceId) {
+      return [];
+    }
+    return Object.values(peerDiffTasks)
+      .filter((task) => task.folderId === selectedFolder.id && task.deviceId === selectedDeviceId)
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }, [peerDiffTasks, selectedDeviceId, selectedFolder]);
 
@@ -2215,11 +2661,29 @@ function App() {
     }
   };
 
+  const loadFolderIgnores = async (folderId: string) => {
+    setFolderIgnoreBusy(true);
+    setFolderIgnoreError("");
+    try {
+      const response = await getJSON<IgnoreResponse>(`/rest/db/ignores?folder=${encodeURIComponent(folderId)}`);
+      setFolderIgnoreText((response.ignore ?? []).join("\n"));
+      setFolderIgnoreError(response.error ?? "");
+    } catch (error) {
+      setFolderIgnoreText("");
+      setFolderIgnoreError(error instanceof Error ? error.message : "加载忽略模式失败");
+    } finally {
+      setFolderIgnoreBusy(false);
+    }
+  };
+
   const openFolderEditor = () => {
     if (!selectedFolder) {
       return;
     }
-    setFolderDraft(cloneJSON(selectedFolder));
+    setFolderDraft(prepareFolderDraft(selectedFolder));
+    setFolderIgnoreText("");
+    setFolderAddIgnores(false);
+    void loadFolderIgnores(selectedFolder.id);
     setFolderSaveMessage("");
     setFolderEditorOpen(true);
   };
@@ -2227,19 +2691,37 @@ function App() {
   const closeFolderEditor = () => {
     setFolderEditorOpen(false);
     setFolderDraft(null);
+    setFolderIgnoreText("");
+    setFolderIgnoreError("");
+    setFolderIgnoreBusy(false);
+    setFolderAddIgnores(false);
     setFolderSaveMessage("");
   };
 
   const openDeviceEditor = (device: DeviceConfig) => {
     setDeviceEditorId(device.deviceID);
     setDeviceDraft(cloneJSON(device));
+    setDeviceShareDraft(buildDeviceShareDraft(device.deviceID));
     setDeviceSaveMessage("");
   };
 
   const closeDeviceEditor = () => {
     setDeviceEditorId("");
     setDeviceDraft(null);
+    setDeviceShareDraft({ selected: {}, encryptionPasswords: {} });
     setDeviceSaveMessage("");
+  };
+
+  const toggleFolderPaused = async (folder: FolderConfig) => {
+    const next = prepareFolderDraft(folder);
+    next.paused = !folder.paused;
+    try {
+      await putJSON(`/rest/config/folders/${encodeURIComponent(folder.id)}`, buildFolderPayload(next));
+      setOverviewMessage(next.paused ? `已暂停文件夹“${folderLabel(folder)}”。` : `已恢复文件夹“${folderLabel(folder)}”。`);
+      await loadBootstrap();
+    } catch (error) {
+      setOverviewMessage(error instanceof Error ? error.message : "切换文件夹暂停状态失败");
+    }
   };
 
   const saveFolderDraft = async () => {
@@ -2249,17 +2731,14 @@ function App() {
     setFolderSaveBusy(true);
     setFolderSaveMessage("");
     try {
-      const payload = cloneJSON(folderDraft);
-      if (!canReceive(payload)) {
-        payload.manualSync = false;
-      }
-      if (!canPublish(payload)) {
-        payload.manualPublish = false;
-      }
+      const payload = buildFolderPayload(folderDraft);
       await putJSON(`/rest/config/folders/${encodeURIComponent(selectedFolder.id)}`, payload);
+      await postJSON(`/rest/db/ignores?folder=${encodeURIComponent(selectedFolder.id)}`, {
+        ignore: normalizeIgnoreText(folderIgnoreText).split("\n"),
+      });
       setFolderSaveMessage("文件夹设置已保存。");
       await loadBootstrap();
-      setFolderEditorOpen(false);
+      closeFolderEditor();
     } catch (error) {
       setFolderSaveMessage(error instanceof Error ? error.message : "保存文件夹设置失败");
     } finally {
@@ -2295,6 +2774,7 @@ function App() {
       payload.addresses = (payload.addresses ?? []).filter((value) => value.trim().length > 0);
       payload.allowedNetworks = (payload.allowedNetworks ?? []).filter((value) => value.trim().length > 0);
       await putJSON(`/rest/config/devices/${encodeURIComponent(editingDevice.deviceID)}`, payload);
+      await syncDeviceFolderSharing(editingDevice.deviceID, deviceShareDraft, Boolean(payload.untrusted));
       setDeviceSaveMessage("设备设置已保存。");
       await loadBootstrap();
       closeDeviceEditor();
@@ -2327,15 +2807,18 @@ function App() {
     setOptionsSaveMessage("");
     try {
       const defaults = await getJSON<FolderConfig>("/rest/config/defaults/folder");
-      const nextFolder: FolderConfig = {
+      const nextFolder: FolderConfig = prepareFolderDraft({
         ...cloneJSON(defaults),
         id: `folder-${Date.now()}`,
         label: "新文件夹",
         path: "",
         devices: [],
         type: "sendreceive",
-      };
+      });
       setFolderDraft(nextFolder);
+      setFolderIgnoreText("");
+      setFolderIgnoreError("");
+      setFolderAddIgnores(false);
       setFolderEditorOpen(true);
       setSettingsModalOpen(false);
     } catch (error) {
@@ -2358,6 +2841,7 @@ function App() {
       };
       setDeviceEditorId("__new__");
       setDeviceDraft(nextDevice);
+      setDeviceShareDraft({ selected: {}, encryptionPasswords: {} });
       setSettingsModalOpen(false);
     } catch (error) {
       setOptionsSaveMessage(error instanceof Error ? error.message : "打开新设备表单失败");
@@ -2373,14 +2857,13 @@ function App() {
     setFolderSaveBusy(true);
     setFolderSaveMessage("");
     try {
-      const payload = cloneJSON(folderDraft);
-      if (!canReceive(payload)) {
-        payload.manualSync = false;
-      }
-      if (!canPublish(payload)) {
-        payload.manualPublish = false;
-      }
+      const payload = buildFolderPayload(folderDraft);
       await postJSON("/rest/config/folders", payload);
+      if (folderAddIgnores && normalizeIgnoreText(folderIgnoreText).trim().length > 0) {
+        await postJSON(`/rest/db/ignores?folder=${encodeURIComponent(payload.id)}`, {
+          ignore: normalizeIgnoreText(folderIgnoreText).split("\n"),
+        });
+      }
       await loadBootstrap();
       setSelectedFolderId(payload.id);
       closeFolderEditor();
@@ -2402,12 +2885,55 @@ function App() {
       payload.addresses = (payload.addresses ?? []).filter((value) => value.trim().length > 0);
       payload.allowedNetworks = (payload.allowedNetworks ?? []).filter((value) => value.trim().length > 0);
       await postJSON("/rest/config/devices", payload);
+      await syncDeviceFolderSharing(payload.deviceID, deviceShareDraft, Boolean(payload.untrusted));
       await loadBootstrap();
       closeDeviceEditor();
     } catch (error) {
       setDeviceSaveMessage(error instanceof Error ? error.message : "创建设备失败");
     } finally {
       setDeviceSaveBusy(false);
+    }
+  };
+
+  const acceptPendingFolder = async (folderId: string, deviceId: string) => {
+    setNewFolderBusy(true);
+    setOptionsSaveMessage("");
+    try {
+      const defaults = await getJSON<FolderConfig>("/rest/config/defaults/folder");
+      const pending = pendingFolders[folderId];
+      const offeredBy = pending?.offeredBy?.[deviceId];
+      const nextFolder = prepareFolderDraft({
+        ...cloneJSON(defaults),
+        id: folderId,
+        label: offeredBy?.label || folderId,
+        path: "",
+        devices: [{ deviceID: deviceId }],
+        type: offeredBy?.receiveEncrypted ? "receiveencrypted" : "sendreceive",
+      });
+      setFolderDraft(nextFolder);
+      setFolderIgnoreText("");
+      setFolderIgnoreError("");
+      setFolderAddIgnores(false);
+      setFolderSaveMessage("");
+      setFolderEditorOpen(true);
+      setSettingsModalOpen(false);
+    } catch (error) {
+      setOptionsSaveMessage(error instanceof Error ? error.message : "打开待接受文件夹表单失败");
+    } finally {
+      setNewFolderBusy(false);
+    }
+  };
+
+  const dismissPendingFolder = async (folderId: string, deviceId?: string) => {
+    try {
+      const query = new URLSearchParams({ folder: folderId });
+      if (deviceId) {
+        query.set("device", deviceId);
+      }
+      await deleteJSON(`/rest/cluster/pending/folders?${query.toString()}`);
+      await loadBootstrap();
+    } catch (error) {
+      setOptionsSaveMessage(error instanceof Error ? error.message : "忽略待接受文件夹失败");
     }
   };
 
@@ -2478,7 +3004,7 @@ function App() {
     return (
       <main className="login-shell">
         <section className="login-card">
-          <div className="eyebrow">Syncthing Workspace</div>
+          <div className="eyebrow">Syncthing Compare</div>
           <h1>登录 Web GUI</h1>
           <p>新的 React 工作台已接管核心审核流程。登录后可直接进入文件夹对比、接收审核和发布审核。</p>
           <form onSubmit={handleLogin} className="login-form">
@@ -2534,7 +3060,7 @@ function App() {
           <button className="drawer-close-btn" onClick={() => setSidebarOpen(false)} title="关闭侧栏">✕</button>
         )}
         <div className="brand-block">
-          <div className="eyebrow">Syncthing</div>
+          <div className="eyebrow">Syncthing Compare</div>
           <h1>{window.metadata?.deviceIDShort ?? "设备"}</h1>
         </div>
 
@@ -2594,11 +3120,18 @@ function App() {
           ) : (
             remoteDevices.map((device) => {
               const connection = connections?.connections[device.deviceID];
-              const relatedFolderCompletion = folders
-                .map((folder) => completions[device.deviceID]?.[folder.id])
-                .find((value) => Boolean(value));
-              const badgeTone = connectionBadgeTone(Boolean(connection?.connected), relatedFolderCompletion?.remoteState);
-              const badgeLabel = connectionBadgeLabel(Boolean(connection?.connected), relatedFolderCompletion?.remoteState);
+              const aggregateCompletion = aggregateDeviceCompletion(completions[device.deviceID]);
+              const badgeTone = connectionBadgeTone(Boolean(connection?.connected), aggregateCompletion.remoteState);
+              const badgeLabel = connectionBadgeLabel(Boolean(connection?.connected), aggregateCompletion.remoteState);
+              const visibleAddresses = Array.from(
+                new Set([
+                  ...(device.addresses ?? []).map(normalizeAddress),
+                  ...(connection?.address ? [normalizeAddress(connection.address)] : []),
+                ].filter(Boolean)),
+              );
+              const sharedFolders = folders.filter((folder) =>
+                (folder.devices ?? []).some((item) => item.deviceID === device.deviceID),
+              );
               const expanded = Boolean(expandedFolders[`device-${device.deviceID}`]);
               return (
                 <div key={device.deviceID} className="device-card">
@@ -2623,11 +3156,49 @@ function App() {
                   </div>
                   {!expanded && (
                     <div className="device-meta">
-                      完成度：{relatedFolderCompletion?.completion ?? 0}% · 待同步：{relatedFolderCompletion?.needItems ?? 0} 项
+                      同步状态：{aggregateSyncStatusLabel(aggregateCompletion)} · 未同步：{aggregateCompletion.needItems} 项
                     </div>
                   )}
                   {expanded && (
                     <div className="device-detail">
+                      <div className="device-detail-row">
+                        <span className="detail-label">最后可见</span>
+                        <span className="detail-value">{formatLastSeen(deviceStats[device.deviceID]?.lastSeen)}</span>
+                      </div>
+                      <div className="device-detail-row">
+                        <span className="detail-label">同步状态</span>
+                        <span className="detail-value">{aggregateSyncStatusLabel(aggregateCompletion)}</span>
+                      </div>
+                      <div className="device-detail-row">
+                        <span className="detail-label">未同步的项目</span>
+                        <span className="detail-value">
+                          {aggregateCompletion.needItems} 条目, ~{formatBinary(aggregateCompletion.needBytes)}
+                        </span>
+                      </div>
+                      <div className="device-detail-row device-detail-row-stack">
+                        <span className="detail-label">地址</span>
+                        <div className="detail-value detail-list-value">
+                          {visibleAddresses.length === 0 ? <span>未知</span> : visibleAddresses.map((address) => <span key={address}>{address}</span>)}
+                        </div>
+                      </div>
+                      <div className="device-detail-row">
+                        <span className="detail-label">压缩</span>
+                        <span className="detail-value">{compressionLabel(device.compression)}</span>
+                      </div>
+                      <div className="device-detail-row">
+                        <span className="detail-label">自动接受</span>
+                        <span className="detail-value">{yesNo(device.autoAcceptFolders)}</span>
+                      </div>
+                      <div className="device-detail-row">
+                        <span className="detail-label">标识</span>
+                        <span className="detail-value">{device.deviceID.slice(0, 7)}</span>
+                      </div>
+                      <div className="device-detail-row device-detail-row-stack">
+                        <span className="detail-label">文件夹</span>
+                        <div className="detail-value detail-list-value">
+                          {sharedFolders.length === 0 ? <span>-</span> : sharedFolders.map((folder) => <span key={folder.id}>{folderLabel(folder)}</span>)}
+                        </div>
+                      </div>
                       <div className="device-detail-row">
                         <span className="detail-label">设备 ID</span>
                         <span className="detail-value">{device.deviceID.slice(0, 20)}...</span>
@@ -2635,10 +3206,6 @@ function App() {
                       <div className="device-detail-row">
                         <span className="detail-label">连接类型</span>
                         <span className="detail-value">{connection?.type || "未连接"}</span>
-                      </div>
-                      <div className="device-detail-row">
-                        <span className="detail-label">地址</span>
-                        <span className="detail-value">{connection?.address || "未知"}</span>
                       </div>
                       <div className="device-detail-row">
                         <span className="detail-label">下行速率</span>
@@ -2650,15 +3217,11 @@ function App() {
                       </div>
                       <div className="device-detail-row">
                         <span className="detail-label">远端状态</span>
-                        <span className="detail-value">{remoteStateLabel(relatedFolderCompletion?.remoteState)}</span>
+                        <span className="detail-value">{remoteStateLabel(aggregateCompletion.remoteState)}</span>
                       </div>
                       <div className="device-detail-row">
                         <span className="detail-label">完成度</span>
-                        <span className="detail-value">{relatedFolderCompletion?.completion ?? 0}%</span>
-                      </div>
-                      <div className="device-detail-row">
-                        <span className="detail-label">待同步</span>
-                        <span className="detail-value">{relatedFolderCompletion?.needItems ?? 0} 项 / {formatBinary(relatedFolderCompletion?.needBytes)}</span>
+                        <span className="detail-value">{aggregateCompletion.total}%</span>
                       </div>
                     </div>
                   )}
@@ -2734,7 +3297,7 @@ function App() {
           )}
           <div>
             <div className="eyebrow">当前设备</div>
-            <h2>{window.metadata?.deviceIDShort ?? "Syncthing"}</h2>
+            <h2>{window.metadata?.deviceIDShort ?? "Compare"}</h2>
           </div>
           <div className="topbar-actions">
             <button className={`tab-button${uiMode === "desktop" ? " active" : ""}`} onClick={() => setUiMode("desktop")}>
@@ -2749,14 +3312,14 @@ function App() {
             <button
               className="tab-button"
               onClick={() => setReceiveModalOpen(true)}
-              disabled={!selectedFolder || !canReceive(selectedFolder)}
+              disabled={!selectedFolder || isPausedFolder(selectedFolder) || !canReceive(selectedFolder)}
             >
               接收审核
             </button>
             <button
               className="tab-button"
               onClick={() => setPublishModalOpen(true)}
-              disabled={!selectedFolder || !canPublish(selectedFolder)}
+              disabled={!selectedFolder || isPausedFolder(selectedFolder) || !canPublish(selectedFolder)}
             >
               发布审核
             </button>
@@ -2794,6 +3357,48 @@ function App() {
           </section>
         ) : (
           <>
+            {Object.keys(pendingFolders).length > 0 && (
+              <section className="panel surface pending-offers-panel">
+                <div className="panel-header">
+                  <div>
+                    <div className="eyebrow">待接受共享文件夹</div>
+                    <h3>来自远端设备的新文件夹邀请</h3>
+                  </div>
+                </div>
+                <div className="help-block">
+                  如果你希望某台远端设备以后共享的新文件夹自动落到当前设备，可在“编辑设备 &gt; 共享”中开启“自动接受”。
+                </div>
+                <div className="share-list">
+                  {Object.entries(pendingFolders).map(([folderId, pending]) => {
+                    const offers = pendingFolderOfferDevices(pending, devicesById);
+                    return (
+                      <div key={folderId} className="share-folder-row selected">
+                        <div className="folder-offer-head">
+                          <strong>{folderId}</strong>
+                          <span className="help-inline">{offers.map((offer) => deviceName(offer.device)).join("，")}</span>
+                        </div>
+                        {offers.map((offer) => (
+                          <div key={offer.deviceID} className="folder-offer-device">
+                            <div className="help-block">
+                              来自设备：{deviceName(offer.device)}。标签：{offer.observed.label || folderId}
+                              {offer.observed.receiveEncrypted ? "。对端建议使用 Receive Encrypted。" : ""}
+                            </div>
+                            <div className="panel-actions">
+                              <button className="primary-button" onClick={() => void acceptPendingFolder(folderId, offer.deviceID)}>
+                                接受
+                              </button>
+                              <button className="ghost-button" onClick={() => void dismissPendingFolder(folderId, offer.deviceID)}>
+                                忽略
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
             {viewMode === "overview" && (
               <OverviewPanel
                 folders={folders}
@@ -2829,12 +3434,17 @@ function App() {
                 }}
                 onEditFolder={(folder) => {
                   setSelectedFolderId(folder.id);
-                  setFolderDraft(cloneJSON(folder));
+                  setFolderDraft(prepareFolderDraft(folder));
+                  setFolderIgnoreText("");
+                  setFolderIgnoreError("");
+                  setFolderAddIgnores(false);
+                  void loadFolderIgnores(folder.id);
                   setFolderSaveMessage("");
                   setFolderEditorOpen(true);
                 }}
                 onEditDevice={openDeviceEditor}
                 onRescan={(folder) => void rescanFolder(folder)}
+                onTogglePaused={(folder) => void toggleFolderPaused(folder)}
                 localDeviceId={system?.myID}
               />
             )}
@@ -2860,7 +3470,11 @@ function App() {
             onEditDevice={openDeviceEditor}
             onEditFolder={(folder) => {
               setSelectedFolderId(folder.id);
-              setFolderDraft(cloneJSON(folder));
+              setFolderDraft(prepareFolderDraft(folder));
+              setFolderIgnoreText("");
+              setFolderIgnoreError("");
+              setFolderAddIgnores(false);
+              void loadFolderIgnores(folder.id);
               setFolderSaveMessage("");
               setFolderEditorOpen(true);
               setSettingsModalOpen(false);
@@ -2878,6 +3492,13 @@ function App() {
           <FolderSettingsPanel
             draft={folderDraft}
             allDevices={allDevices}
+            completions={completions}
+            ignoreText={folderIgnoreText}
+            onIgnoreTextChange={setFolderIgnoreText}
+            ignoreError={folderIgnoreError}
+            ignoreBusy={folderIgnoreBusy}
+            addIgnores={folderAddIgnores}
+            onAddIgnoresChange={setFolderAddIgnores}
             onChange={setFolderDraft}
             onClose={closeFolderEditor}
             onSave={() => void (editingExistingFolder ? saveFolderDraft() : saveNewFolder())}
@@ -2890,10 +3511,18 @@ function App() {
       )}
 
       {deviceDraft && (editingExistingDevice || editingNewDevice) && (
-        <ModalShell title={editingNewDevice ? "新建设备" : "编辑设备"} onClose={closeDeviceEditor}>
+        <ModalShell
+          title={editingNewDevice ? `新建设备 (${deviceName(deviceDraft)})` : `编辑设备 (${deviceName(deviceDraft)})`}
+          onClose={closeDeviceEditor}
+        >
           <DeviceSettingsPanel
             draft={deviceDraft}
             onChange={setDeviceDraft}
+            shareDraft={deviceShareDraft}
+            onShareDraftChange={setDeviceShareDraft}
+            allFolders={folders}
+            allDevices={allDevices.filter((device) => device.deviceID !== system?.myID)}
+            completions={completions}
             onClose={closeDeviceEditor}
             onSave={() => void (editingExistingDevice ? saveDeviceDraft() : saveNewDevice())}
             busy={deviceSaveBusy}
@@ -2933,7 +3562,20 @@ function App() {
       )}
 
       {bidiffModalOpen && selectedFolder && (
-        <ModalShell title={`双向差异裁决 - ${folderLabel(selectedFolder)}`} onClose={() => setBiDiffModalOpen(false)}>
+        <ModalShell
+          title={
+            <WorkbenchTitle
+              label={`裁决 · ${folderLabel(selectedFolder)}`}
+              device={selectedDevice}
+              connection={selectedDeviceId ? connections?.connections[selectedDeviceId] : undefined}
+              stats={titleBarStats}
+            />
+          }
+          onClose={() => {
+            setBiDiffModalOpen(false);
+            setTitleBarStats(null);
+          }}
+        >
           <BiDiffPanel
             mode="bidiff"
             folder={selectedFolder}
@@ -2967,15 +3609,31 @@ function App() {
             remoteCompletion={selectedDeviceId ? completions[selectedDeviceId]?.[selectedFolder.id] : undefined}
             scanBusy={panelScanBusy === "bidiff"}
             activeTasks={activeBiDiffTasks}
+            allTasks={allBiDiffTasks}
             uiMode={uiMode}
             autoRefreshPaused={bidiffAutoRefreshPaused}
             onToggleAutoRefreshPaused={() => setBidiffAutoRefreshPaused((previous) => !previous)}
+            titleStats={setTitleBarStats}
           />
         </ModalShell>
       )}
 
       {peerDiffModalOpen && selectedFolder && (
-        <ModalShell title={`对等差异工作台 - ${folderLabel(selectedFolder)}`} onClose={() => setPeerDiffModalOpen(false)}>
+        <ModalShell
+          title={
+            <WorkbenchTitle
+              label={`对等 · ${folderLabel(selectedFolder)}`}
+              device={selectedDevice}
+              connection={selectedDeviceId ? connections?.connections[selectedDeviceId] : undefined}
+              stats={titleBarStats}
+              isPeer
+            />
+          }
+          onClose={() => {
+            setPeerDiffModalOpen(false);
+            setTitleBarStats(null);
+          }}
+        >
           <BiDiffPanel
             mode="peer"
             folder={selectedFolder}
@@ -3009,9 +3667,11 @@ function App() {
             remoteCompletion={selectedDeviceId ? completions[selectedDeviceId]?.[selectedFolder.id] : undefined}
             scanBusy={panelScanBusy === "peerdiff"}
             activeTasks={activePeerDiffTasks}
+            allTasks={allPeerDiffTasks}
             uiMode={uiMode}
             autoRefreshPaused={peerDiffAutoRefreshPaused}
             onToggleAutoRefreshPaused={() => setPeerDiffAutoRefreshPaused((previous) => !previous)}
+            titleStats={setTitleBarStats}
           />
         </ModalShell>
       )}
@@ -3079,6 +3739,7 @@ function OverviewPanel(props: {
   onEditFolder: (folder: FolderConfig) => void;
   onEditDevice: (device: DeviceConfig) => void;
   onRescan: (folder: FolderConfig) => void;
+  onTogglePaused: (folder: FolderConfig) => void;
 }) {
   const [ovColumns, setOvColumns] = useState([
     { key: "name", label: "文件夹", width: 140, minWidth: 80 },
@@ -3135,6 +3796,7 @@ function OverviewPanel(props: {
           const active = props.selectedFolderId === folder.id;
           const receiveCapable = canReceive(folder);
           const publishCapable = canPublish(folder);
+          const paused = isPausedFolder(folder);
           const remoteDeviceNames = devices.slice(0, 2).map((d) => deviceName(d)).join(", ");
           const extraCount = devices.length - 2;
 
@@ -3187,27 +3849,34 @@ function OverviewPanel(props: {
                   )}
                 </div>
                 <div className="ov-cell ov-cell-actions">
-                  <button className="mini-button" onClick={() => props.onRescan(folder)} title="刷新状态">↻</button>
+                  <button className="mini-button" onClick={() => props.onRescan(folder)} disabled={paused} title={paused ? "暂停中的文件夹不可刷新" : "刷新状态"}>↻</button>
                   <button className="mini-button" onClick={() => props.onEditFolder(folder)} title="编辑设置">✎</button>
-                  <button className="mini-button secondary" onClick={() => props.onOpenBiDiff(folder)} title="双向裁决">
+                  <button
+                    className={`mini-button ${folder.paused ? "secondary" : ""}`}
+                    onClick={() => props.onTogglePaused(folder)}
+                    title={folder.paused ? "恢复文件夹" : "暂停文件夹"}
+                  >
+                    {folder.paused ? "恢复" : "暂停"}
+                  </button>
+                  <button className="mini-button secondary" onClick={() => props.onOpenBiDiff(folder)} disabled={paused} title={paused ? "请先恢复文件夹" : "双向裁决"}>
                     裁决
                   </button>
-                  <button className="mini-button secondary" onClick={() => props.onOpenPeerDiff(folder)} title="对等差异工作台">
+                  <button className="mini-button secondary" onClick={() => props.onOpenPeerDiff(folder)} disabled={paused} title={paused ? "请先恢复文件夹" : "对等差异工作台"}>
                     对等
                   </button>
                   <button
                     className="mini-button primary"
                     onClick={() => props.onOpenReceive(folder)}
-                    disabled={!receiveCapable}
-                    title="接收审核"
+                    disabled={paused || !receiveCapable}
+                    title={paused ? "请先恢复文件夹" : "接收审核"}
                   >
                     接收
                   </button>
                   <button
                     className="mini-button"
                     onClick={() => props.onOpenPublish(folder)}
-                    disabled={!publishCapable}
-                    title="发布审核"
+                    disabled={paused || !publishCapable}
+                    title={paused ? "请先恢复文件夹" : "发布审核"}
                   >
                     发布
                   </button>
@@ -3325,6 +3994,10 @@ function ReceiveReviewPanel(props: {
   const rawEntries = props.compare?.entries ?? [];
   const entries = useMemo(() => filterReceiveEntriesForView(rawEntries, props.compareView), [rawEntries, props.compareView]);
   const selectedCount = entries.filter((entry) => props.compareSelection[entry.path] && entry.canPrioritize).length;
+  const emptyText =
+    props.compareView === "incoming"
+      ? "当前没有来自远端、会影响当前设备的差异。"
+      : "当前筛选条件下没有差异项。";
   const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({});
   const [columns, setColumns] = useState<ColumnDef[]>([
     { key: "checkbox", label: "", width: 40, minWidth: 40 },
@@ -3554,9 +4227,7 @@ function ReceiveReviewPanel(props: {
           </tbody>
         </ResizableTable>
 
-        {entries.length === 0 && !props.compareBusy && (
-          <div className="compare-empty">当前筛选条件下没有差异项。</div>
-        )}
+        {entries.length === 0 && !props.compareBusy && <div className="compare-empty">{emptyText}</div>}
       </div>
 
       <div className="review-modal-sidebar">
@@ -3644,17 +4315,36 @@ function BiDiffPanel(props: {
   remoteCompletion?: CompletionStatus;
   scanBusy: boolean;
   activeTasks: BiDiffTask[];
+  allTasks: BiDiffTask[];
   uiMode: UiMode;
   autoRefreshPaused: boolean;
   onToggleAutoRefreshPaused: () => void;
+  titleStats?: (stats: { total: number; selected: number; leftToRight: number; rightToLeft: number; pending?: number; previewReady?: boolean }) => void;
 }) {
-  const entries = useMemo(() => (props.bidiff?.entries ?? []).filter((entry) => !isGuiInertBiDiffEntry(entry)), [props.bidiff?.entries]);
+  const entries = useMemo(() => {
+    const base = props.bidiff?.entries ?? [];
+    if (props.bidiffView === "all-with-same") {
+      return base;
+    }
+    return base.filter((entry) => !isGuiInertBiDiffEntry(entry));
+  }, [props.bidiff?.entries, props.bidiffView]);
   const selectedTotal = entries.filter((entry) => props.bidiffSelection[entry.path]).length;
   const selectedLeftToRight = entries.filter((entry) => props.bidiffSelection[entry.path] && entry.canApplyLeftToRight).length;
   const selectedRightToLeft = entries.filter((entry) => props.bidiffSelection[entry.path] && entry.canApplyRightToLeft).length;
   const hasSelection = selectedTotal > 0;
   const selectedBlocked = Math.max(0, selectedTotal - Math.max(selectedLeftToRight, selectedRightToLeft));
-  const [sidebarWidth, setSidebarWidth] = useState(() => readStoredPixels(BIDIFF_SIDEBAR_WIDTH_KEY, 280, 220, 420));
+
+  useEffect(() => {
+    props.titleStats?.({
+      total: props.bidiff?.total ?? 0,
+      selected: selectedTotal,
+      leftToRight: entries.filter((e) => e.canApplyLeftToRight).length,
+      rightToLeft: entries.filter((e) => e.canApplyRightToLeft).length,
+      pending: props.bidiff?.localPendingItems ?? 0,
+      previewReady: props.bidiff?.remotePreviewAvailable,
+    });
+  }, [props.bidiff?.total, selectedTotal, entries, props.bidiff?.localPendingItems, props.bidiff?.remotePreviewAvailable]);
+  const [sidebarWidth, setSidebarWidth] = useState(() => readStoredPixels(BIDIFF_SIDEBAR_WIDTH_KEY, 280, 160, 420));
   const [timeMode, setTimeMode] = useState<"compact" | "full">(() => {
     try {
       const raw = window.localStorage.getItem(BIDIFF_TIME_MODE_KEY);
@@ -3669,19 +4359,36 @@ function BiDiffPanel(props: {
   const [density, setDensity] = useState<BiDiffDensity>(() =>
     readStoredChoice(BIDIFF_DENSITY_KEY, "normal", ["relaxed", "normal", "compact", "tight"] as const)
   );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [treeMode, setTreeMode] = useState(true);
   const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({});
   const [columns, setColumns] = useState<ColumnDef[]>(() => biDiffColumnsForDensity(density, false));
+  const mainScrollRef = useRef<HTMLDivElement | null>(null);
+  const tableScrollRef = useRef<HTMLDivElement | null>(null);
+  const [taskPanelTab, setTaskPanelTab] = useState<TaskPanelTab>("running");
   const treeNodes = useMemo(() => buildBiDiffTree(entries), [entries]);
   const treeRows = useMemo(() => flattenBiDiffTree(treeNodes, expandedDirs), [treeNodes, expandedDirs]);
   const mobileRows = treeMode ? treeRows : entries.map((entry) => ({ type: "file" as const, key: `file:${entry.path}`, node: { key: `file:${entry.path}`, name: entry.path, fullPath: entry.path, type: "file" as const, entry, children: [] }, depth: 0, guides: [], isLast: true, entry }));
-  const headerDetailText =
-    props.mode === "peer"
-      ? `默认只显示差异，不预设参考侧；先勾选再执行。当前是独立对等工作台，手机建议横屏查看。${peerWorkbenchDetailText(props.bidiff)}`
-      : "默认只显示差异，不预设参考侧；先勾选再执行。手机建议横屏查看，若内置 WebGUI 操作不顺，建议改用系统浏览器。";
-  const peerSummaryCompact = props.bidiff
-    ? `对等工作台 · 未发布 ${props.bidiff.localPendingItems ?? 0} 项 · 远端预览${props.bidiff.remotePreviewAvailable ? "已接收" : "未接收"}`
-    : "对等工作台 · 正在准备差异数据";
+  const completedTasks = useMemo(
+    () =>
+      props.allTasks
+        .filter((task) => task.status === "completed" || task.status === "failed")
+        .sort((a, b) => b.updatedAt - a.updatedAt),
+    [props.allTasks],
+  );
+  const taskPanelItems = taskPanelTab === "running" ? props.activeTasks : completedTasks;
+  const rowTaskMap = useMemo(() => {
+    const map = new Map<string, BiDiffTask>();
+    for (const task of props.allTasks) {
+      const current = map.get(task.path);
+      if (!current || current.updatedAt < task.updatedAt) {
+        map.set(task.path, task);
+      }
+    }
+    return map;
+  }, [props.allTasks]);
+  const allSelectable = entries.length > 0 && entries.every((entry) => props.bidiffSelection[entry.path]);
+  const someSelected = entries.some((entry) => props.bidiffSelection[entry.path]);
 
   useEffect(() => {
     setExpandedDirs((previous) => {
@@ -3697,6 +4404,29 @@ function BiDiffPanel(props: {
     });
   }, [treeNodes]);
 
+  useEffect(() => {
+    if (taskPanelTab === "running" && props.activeTasks.length === 0 && completedTasks.length > 0) {
+      setTaskPanelTab("done");
+    }
+    if (taskPanelTab === "done" && completedTasks.length === 0) {
+      setTaskPanelTab("running");
+    }
+  }, [completedTasks.length, props.activeTasks.length, taskPanelTab]);
+
+  useEffect(() => {
+    if (!tableScrollRef.current) {
+      return;
+    }
+    tableScrollRef.current.scrollLeft = 0;
+  }, [sidebarCollapsed, props.selectedDeviceId, props.bidiffView, treeMode, density, fontScale]);
+
+  useEffect(() => {
+    if (!mainScrollRef.current) {
+      return;
+    }
+    mainScrollRef.current.scrollLeft = 0;
+  }, [sidebarCollapsed, props.selectedDeviceId, props.bidiffView, treeMode, density, fontScale]);
+
   if (props.devices.length === 0) {
     return (
       <div className="review-modal-layout">
@@ -3708,8 +4438,11 @@ function BiDiffPanel(props: {
   }
 
   return (
-    <div className="review-modal-layout" style={{ gridTemplateColumns: `minmax(0, 1fr) ${sidebarWidth}px` }}>
-      <div className="review-modal-main">
+    <div
+      className={`review-modal-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}`}
+      style={{ gridTemplateColumns: `minmax(0, 1fr) ${sidebarCollapsed ? 56 : sidebarWidth}px` }}
+    >
+      <div ref={mainScrollRef} className="review-modal-main">
         <div className="review-toolbar review-toolbar-bidiff">
           <label>
             <span>裁决列</span>
@@ -3825,38 +4558,11 @@ function BiDiffPanel(props: {
         <div className="review-stats">
           <span className="badge tone-info">{props.mode === "peer" ? "对等差异工作台" : "中立差异裁决"}</span>
           <span className={`badge tone-${props.bidiff?.rightConnected ? "success" : "warning"}`}>{props.bidiff?.rightConnected ? "右侧已连接" : "右侧离线"}</span>
-          <span>右侧设备：{deviceName(props.selectedDevice ?? undefined)}</span>
-          <span>共 {props.bidiff?.total ?? 0} 项</span>
-          <span>已选 {selectedTotal} 项</span>
-          <span>左→右可执行 {entries.filter((entry) => entry.canApplyLeftToRight).length} 项</span>
-          <span>右→左可执行 {entries.filter((entry) => entry.canApplyRightToLeft).length} 项</span>
-          {props.mode === "peer" && <span>本地未正式发布 {props.bidiff?.localPendingItems ?? 0} 项</span>}
           {(selectedLeftToRight > 0 || selectedRightToLeft > 0 || selectedBlocked > 0) && (
             <span>
               当前已选：左→右 {selectedLeftToRight} / 右→左 {selectedRightToLeft}
               {selectedBlocked > 0 ? ` / 仅选中未执行 ${selectedBlocked}` : ""}
             </span>
-          )}
-          {treeMode && <span>目录视图 {treeNodes.length} 个顶层节点</span>}
-          {props.mode === "peer" && (
-            <span>
-              预览模式：
-              {props.bidiff?.previewMode === "remote-preview-index-plus-local"
-                ? "本地工作态 + 远端预览索引"
-                : props.bidiff?.previewMode === "announced-index-plus-local"
-                  ? "本地工作态 + 对端最后已知索引"
-                  : "最后已知索引"}
-            </span>
-          )}
-          {props.mode === "peer" && <span>序列：左侧 {props.bidiff?.localSequence ?? 0} / 右侧已知 {props.bidiff?.rightSequence ?? 0}</span>}
-          {props.mode === "peer" && (
-            <span>
-              远端预览：
-              {props.bidiff?.remotePreviewAvailable ? `已接收 #${props.bidiff?.remotePreviewSequence ?? 0}` : "未接收"}
-            </span>
-          )}
-          {props.mode === "peer" && props.bidiff?.remotePreviewAvailable && props.bidiff?.remotePreviewUpdated && (
-            <span>预览更新：{formatDate(props.bidiff.remotePreviewUpdated, timeMode)}</span>
           )}
           <label className="review-inline-select">
             <span>侧栏宽度</span>
@@ -3868,12 +4574,24 @@ function BiDiffPanel(props: {
                 storePixels(BIDIFF_SIDEBAR_WIDTH_KEY, next);
               }}
             >
-              <option value={240}>窄</option>
+              <option value={160}>极窄</option>
+              <option value={180}>很窄</option>
+              <option value={200}>较窄</option>
+              <option value={220}>微窄</option>
+              <option value={240}>偏窄</option>
               <option value={280}>标准</option>
-              <option value={340}>宽</option>
+              <option value={320}>稍宽</option>
+              <option value={360}>宽</option>
               <option value={400}>更宽</option>
             </select>
           </label>
+          <button
+            className="ghost-button compact-button"
+            onClick={() => setSidebarCollapsed((previous) => !previous)}
+            title={sidebarCollapsed ? "展开右侧面板" : "收起右侧面板"}
+          >
+            {sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
+          </button>
           {treeMode && (
             <>
               <button
@@ -3922,20 +4640,6 @@ function BiDiffPanel(props: {
             {!props.bidiff?.manualPublish && " 先开启手动审核发布；"}
           </div>
         )}
-        {props.mode === "peer" && (
-          <div className="review-summary-compact" title={peerWorkbenchDetailText(props.bidiff)}>
-            <span className="badge tone-info">对等</span>
-            <span className="review-summary-text">{peerSummaryCompact}</span>
-            <span className="review-summary-help">悬浮查看详细说明</span>
-          </div>
-        )}
-        <div
-          className="review-mobile-hint"
-          title={headerDetailText}
-        >
-          {props.mode === "peer" ? "默认仅看差异；先勾选再执行。" : "默认仅看差异，先勾选再执行；手机建议横屏。 "}
-        </div>
-
         {props.bidiffMessage && <div className="inline-message info">{props.bidiffMessage}</div>}
         {props.bidiffError && <div className="inline-message danger">{props.bidiffError}</div>}
         {hasSelection && selectedLeftToRight === 0 && selectedRightToLeft === 0 && (
@@ -4015,14 +4719,11 @@ function BiDiffPanel(props: {
                         <span className={`badge compare-status-badge kind-${bidiffKind(entry)}`}>{bidiffStatusLabel(entry)}</span>
                         <span className={`badge compare-action-badge ${actionability.className}`} title={actionability.title}>{actionability.label}</span>
                       </div>
-                      <div className="path-line">
-                        <span className={renameRole === "new" ? "rename-new-path" : renameRole === "old" ? "rename-old-path" : undefined}>{entry.path}</span>
+                      <div className="path-line" title={bidiffRenameInlineText(entry, entry.path)}>
+                        <span className={`compare-tree-file-combined ${renameRole === "new" ? "rename-new-path" : renameRole === "old" ? "rename-old-path" : ""}`}>
+                          {bidiffRenameInlineText(entry, entry.path)}
+                        </span>
                       </div>
-                      {entry.renameCandidate && (
-                        <div className={`helper-line ${renameRole === "new" ? "rename-new-path" : renameRole === "old" ? "rename-old-path" : ""}`}>
-                          {renameRole === "new" ? `旧：${entry.renameCandidate}` : renameRole === "old" ? `新：${entry.renameCandidate}` : entry.renameCandidate}
-                        </div>
-                      )}
                       {currentTask && (
                         <div className="compare-inline-progress">
                           <span className={`badge tone-${bidiffTaskTone(currentTask.status)}`}>{bidiffTaskLabel(currentTask.status)}</span>
@@ -4049,9 +4750,28 @@ function BiDiffPanel(props: {
               columns={columns}
               onColumnsChange={setColumns}
               className={`bidiff-table bidiff-font-${fontScale} bidiff-density-${density}`}
+              wrapperRef={tableScrollRef}
             >
               <thead>
-                <tr>{renderResizableHeaders(columns, setColumns)}</tr>
+                <tr>
+                  {renderResizableHeaders(columns, setColumns, {
+                    checkbox: (
+                      <TreeCheckbox
+                        checked={allSelectable}
+                        indeterminate={someSelected && !allSelectable}
+                        onChange={(checked) => {
+                          const next: Record<string, boolean> = {};
+                          if (checked) {
+                            for (const entry of entries) {
+                              next[entry.path] = true;
+                            }
+                          }
+                          props.onBidiffSelectionChange(next);
+                        }}
+                      />
+                    ),
+                  })}
+                </tr>
               </thead>
               <tbody>
                 {(treeMode ? treeRows : entries.map((entry) => ({ type: "file" as const, key: `file:${entry.path}`, node: { key: `file:${entry.path}`, name: entry.path, fullPath: entry.path, type: "file" as const, entry, children: [] }, depth: 0, entry }))).map((row) => {
@@ -4138,12 +4858,12 @@ function BiDiffPanel(props: {
               const renameRole = bidiffRenameRole(entry);
               const canSelect = entry.canApplyLeftToRight || entry.canApplyRightToLeft;
               const actionability = bidiffActionabilityLabel(entry);
-              const currentTask = props.activeTasks.find((task) => task.path === entry.path && task.status !== "completed");
+              const currentTask = rowTaskMap.get(entry.path);
               const showAction = columns.find((c) => c.key === "action")?.visible !== false;
               return (
                 <tr
                   key={entry.path}
-                  className={`compare-tree-file-row tone-${statusTone(entry.status)} kind-${kind}${selected ? " selected" : ""}`}
+                  className={`compare-tree-file-row tone-${statusTone(entry.status)} kind-${kind}${selected ? " selected" : ""}${currentTask ? ` task-${currentTask.status}` : ""}`}
                 >
                   <td className="compare-checkbox-cell">
                     <TreeCheckbox
@@ -4174,37 +4894,22 @@ function BiDiffPanel(props: {
                   <td>
                     <div className="compare-status-cell compare-status-stack">
                       {treeMode ? (
-                        <div className="compare-tree-fileline" title={entry.path}>
+                        <div className="compare-tree-fileline" title={bidiffRenameInlineText(entry, entry.path)}>
                           <TreePrefix depth={row.depth} guides={row.guides} isLast={row.isLast} />
                           <span className="tree-file-dot" aria-hidden="true" />
-                          <span className={`compare-tree-name compare-tree-file-name${renameRole === "new" ? " rename-new-path" : renameRole === "old" ? " rename-old-path" : ""}`}>{row.node.name}</span>
-                          {entry.renameCandidate && (
-                            <span className="compare-rename-inline">
-                              {renameRole === "new"
-                                ? ` (旧：${entry.renameCandidate})`
-                                : renameRole === "old"
-                                  ? ` (新：${entry.renameCandidate})`
-                                  : ` (${entry.renameCandidate})`}
-                            </span>
-                          )}
+                          <span className={`compare-tree-name compare-tree-file-name compare-tree-file-combined${renameRole === "new" ? " rename-new-path" : renameRole === "old" ? " rename-old-path" : ""}`}>
+                            {bidiffRenameInlineText(entry, row.node.name)}
+                          </span>
                         </div>
                       ) : (
-                        <div className="compare-path compare-main-path" title={entry.path}>
-                          <span className={renameRole === "new" ? "rename-new-path" : renameRole === "old" ? "rename-old-path" : undefined}>{entry.path}</span>
-                          {entry.renameCandidate && (
-                            <span className="compare-rename-inline">
-                              {renameRole === "new"
-                                ? ` (旧：${entry.renameCandidate})`
-                                : renameRole === "old"
-                                  ? ` (新：${entry.renameCandidate})`
-                                  : ` (${entry.renameCandidate})`}
-                            </span>
-                          )}
+                        <div className="compare-path compare-main-path compare-main-path-combined" title={bidiffRenameInlineText(entry, entry.path)}>
+                          <span className={`compare-tree-file-combined ${renameRole === "new" ? "rename-new-path" : renameRole === "old" ? "rename-old-path" : ""}`}>
+                            {bidiffRenameInlineText(entry, entry.path)}
+                          </span>
                         </div>
                       )}
                       {currentTask && (
                         <div className="compare-inline-progress">
-                          <span className={`badge tone-${bidiffTaskTone(currentTask.status)}`}>{bidiffTaskLabel(currentTask.status)}</span>
                           <ProgressBar percent={bidiffTaskPercent(currentTask.status)} tone={bidiffTaskTone(currentTask.status)} />
                         </div>
                       )}
@@ -4233,6 +4938,22 @@ function BiDiffPanel(props: {
       </div>
 
       <div className="review-modal-sidebar">
+        <button
+          className={`review-sidebar-edge-toggle${sidebarCollapsed ? " is-collapsed" : ""}`}
+          onClick={() => setSidebarCollapsed((previous) => !previous)}
+          title={sidebarCollapsed ? "展开右侧面板" : "收起右侧面板"}
+          aria-label={sidebarCollapsed ? "展开右侧面板" : "收起右侧面板"}
+        >
+          {sidebarCollapsed ? "◂" : "▸"}
+        </button>
+        {sidebarCollapsed ? (
+          <div className="review-sidebar-collapsed">
+            <span className={`badge tone-${props.bidiff?.rightConnected ? "success" : "warning"}`} title={deviceName(props.selectedDevice ?? undefined)}>
+              {props.bidiff?.rightConnected ? "连" : "离"}
+            </span>
+          </div>
+        ) : (
+          <>
         <div className="review-sidebar-card">
           <div className="section-title">目标设备</div>
           <select value={props.selectedDeviceId} onChange={(event) => props.onSelectDevice(event.target.value)} style={{ width: "100%", marginTop: 6 }}>
@@ -4251,12 +4972,19 @@ function BiDiffPanel(props: {
         </div>
 
         <div className="review-sidebar-card">
-          <div className="section-title">正在处理</div>
-          {props.activeTasks.length === 0 ? (
-            <div className="empty-mini">当前没有正在处理的裁决条目。</div>
+          <div className="task-tabs">
+            <button className={`tab-button${taskPanelTab === "running" ? " active" : ""}`} onClick={() => setTaskPanelTab("running")}>
+              处理中
+            </button>
+            <button className={`tab-button${taskPanelTab === "done" ? " active" : ""}`} onClick={() => setTaskPanelTab("done")}>
+              处理完成
+            </button>
+          </div>
+          {taskPanelItems.length === 0 ? (
+            <div className="empty-mini">{taskPanelTab === "running" ? "当前没有正在处理的裁决条目。" : "当前没有已完成或失败的裁决条目。"}</div>
           ) : (
             <div className="task-list">
-              {props.activeTasks.slice(0, 8).map((task) => (
+              {taskPanelItems.slice(0, 12).map((task) => (
                 <div key={task.key} className={`task-item tone-${bidiffTaskTone(task.status)}`}>
                   <div className="task-item-head">
                     <span className={`badge tone-${bidiffTaskTone(task.status)}`}>{bidiffTaskLabel(task.status)}</span>
@@ -4327,6 +5055,8 @@ function BiDiffPanel(props: {
             采用右侧（可执行 {selectedRightToLeft} / 已选 {selectedTotal}）
           </button>
         </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -4671,13 +5401,13 @@ function PublishReviewPanel(props: {
   );
 }
 
-function ModalShell(props: { title: string; onClose: () => void; children: ReactNode }) {
+function ModalShell(props: { title: ReactNode; onClose: () => void; children: ReactNode }) {
   return (
     <div className="modal-backdrop" onClick={props.onClose}>
       <section className="modal-shell surface" onClick={(event) => event.stopPropagation()}>
         <div className="modal-header">
           <div>
-            <div className="eyebrow">React Workspace</div>
+            <div className="eyebrow">工作台</div>
             <h3>{props.title}</h3>
           </div>
           <button className="ghost-button" onClick={props.onClose}>
@@ -4687,6 +5417,34 @@ function ModalShell(props: { title: string; onClose: () => void; children: React
         <div className="modal-content">{props.children}</div>
       </section>
     </div>
+  );
+}
+
+function WorkbenchTitle(props: {
+  label: string;
+  device?: DeviceConfig | null;
+  connection?: DeviceConnection;
+  stats?: { total: number; selected: number; leftToRight: number; rightToLeft: number; pending?: number; previewReady?: boolean } | null;
+  isPeer?: boolean;
+}) {
+  const device = props.device ? deviceName(props.device) : "未选择设备";
+  const down = formatRate(props.connection?.inbps);
+  const up = formatRate(props.connection?.outbps);
+  const s = props.stats;
+  return (
+    <span className="workbench-title-inline">
+      <span>{props.label}</span>
+      <span className="workbench-title-meta">
+        · {device} · ↓ {down} · ↑ {up}
+        {s && (
+          <>
+            {" · 共"} {s.total} 项 · 已选 {s.selected} · 左→右 {s.leftToRight} · 右→左 {s.rightToLeft}
+            {props.isPeer && s.pending != null && ` · 未发布 ${s.pending}`}
+            {props.isPeer && (s.previewReady ? " · 预览已接收" : " · 预览未接收")}
+          </>
+        )}
+      </span>
+    </span>
   );
 }
 
@@ -4913,6 +5671,13 @@ function SettingsHubPanel(props: {
 function FolderSettingsPanel(props: {
   draft: FolderConfig;
   allDevices: DeviceConfig[];
+  completions: Record<string, Record<string, CompletionStatus>>;
+  ignoreText: string;
+  onIgnoreTextChange: (value: string) => void;
+  ignoreError: string;
+  ignoreBusy: boolean;
+  addIgnores: boolean;
+  onAddIgnoresChange: (value: boolean) => void;
   onChange: (value: FolderConfig) => void;
   onClose: () => void;
   onSave: () => void;
@@ -4923,6 +5688,16 @@ function FolderSettingsPanel(props: {
 }) {
   const draft = props.draft;
   const update = (patch: Partial<FolderConfig>) => props.onChange({ ...draft, ...patch });
+  const [activeTab, setActiveTab] = useState<FolderEditorTab>("general");
+  const selectedDeviceIds = useMemo(() => new Set((draft.devices ?? []).map((item) => item.deviceID)), [draft.devices]);
+  const sharedDevices = useMemo(() => props.allDevices.filter((device) => selectedDeviceIds.has(device.deviceID)), [props.allDevices, selectedDeviceIds]);
+  const unsharedDevices = useMemo(() => props.allDevices.filter((device) => !selectedDeviceIds.has(device.deviceID)), [props.allDevices, selectedDeviceIds]);
+  const internalVersioningEnabled = draft._guiVersioning ? !["none", "external"].includes(draft._guiVersioning.selector) : false;
+
+  useEffect(() => {
+    setActiveTab("general");
+  }, [draft.id]);
+
   const updateDeviceSelection = (deviceID: string, enabled: boolean) => {
     const current = draft.devices ?? [];
     if (enabled) {
@@ -4940,6 +5715,33 @@ function FolderSettingsPanel(props: {
       devices: current.filter((item) => item.deviceID !== deviceID),
     });
   };
+  const updateDeviceEncryptionPassword = (deviceID: string, encryptionPassword: string) => {
+    const current = draft.devices ?? [];
+    props.onChange({
+      ...draft,
+      devices: current.map((item) => (item.deviceID === deviceID ? { ...item, encryptionPassword } : item)),
+    });
+  };
+  const toggleAllDevices = (enabled: boolean, scope: "shared" | "unshared" | "all") => {
+    const source = scope === "shared" ? sharedDevices : scope === "unshared" ? unsharedDevices : props.allDevices;
+    const current = new Map((draft.devices ?? []).map((item) => [item.deviceID, item]));
+    for (const device of source) {
+      if (enabled) {
+        if (!current.has(device.deviceID)) {
+          current.set(device.deviceID, { deviceID: device.deviceID });
+        }
+      } else {
+        current.delete(device.deviceID);
+      }
+    }
+    props.onChange({ ...draft, devices: Array.from(current.values()) });
+  };
+  const guiVersioning = draft._guiVersioning ?? createDefaultGuiVersioning();
+  const updateGuiVersioning = (patch: Partial<typeof guiVersioning>) => {
+    update({ _guiVersioning: { ...guiVersioning, ...patch } });
+  };
+  const folderTypeLocked = !props.isNew && draft.type === "receiveencrypted";
+  const remoteStateForFolder = (deviceID: string) => props.completions[deviceID]?.[draft.id]?.remoteState;
 
   return (
     <section className="panel surface workspace-panel">
@@ -4965,121 +5767,486 @@ function FolderSettingsPanel(props: {
 
       {props.message && <div className="inline-message info">{props.message}</div>}
 
-      <div className="settings-grid">
-        <label>
-          <span>文件夹名称</span>
-          <input value={draft.label ?? ""} onChange={(event) => update({ label: event.target.value })} />
-        </label>
-        <label>
-          <span>文件夹 ID</span>
-          <input value={draft.id} disabled={!props.isNew} onChange={(event) => update({ id: event.target.value })} />
-        </label>
-        <label className="wide-field">
-          <span>本地路径</span>
-          <input value={draft.path} onChange={(event) => update({ path: event.target.value })} />
-        </label>
-        <label>
-          <span>文件夹类型</span>
-          <select value={draft.type} onChange={(event) => update({ type: event.target.value })}>
-            <option value="sendreceive">双向同步</option>
-            <option value="sendonly">仅发送</option>
-            <option value="receiveonly">仅接收</option>
-            <option value="receiveencrypted">加密接收</option>
-          </select>
-        </label>
-        <label>
-          <span>重扫间隔（秒）</span>
-          <input
-            type="number"
-            min={0}
-            value={draft.rescanIntervalS ?? 0}
-            onChange={(event) => update({ rescanIntervalS: Number(event.target.value) || 0 })}
-          />
-        </label>
-        <label>
-          <span>拉取顺序</span>
-          <select value={draft.order ?? "random"} onChange={(event) => update({ order: event.target.value })}>
-            <option value="random">随机</option>
-            <option value="alphabetic">按字母</option>
-            <option value="smallestFirst">小文件优先</option>
-            <option value="largestFirst">大文件优先</option>
-            <option value="oldestFirst">旧文件优先</option>
-            <option value="newestFirst">新文件优先</option>
-          </select>
-        </label>
+      <div className="editor-tabs">
+        <button className={activeTab === "general" ? "primary-button" : "ghost-button"} onClick={() => setActiveTab("general")}>
+          常规
+        </button>
+        <button className={activeTab === "sharing" ? "primary-button" : "ghost-button"} onClick={() => setActiveTab("sharing")}>
+          共享
+        </button>
+        <button className={activeTab === "versioning" ? "primary-button" : "ghost-button"} onClick={() => setActiveTab("versioning")}>
+          文件版本控制
+        </button>
+        <button className={activeTab === "ignores" ? "primary-button" : "ghost-button"} onClick={() => setActiveTab("ignores")}>
+          忽略模式
+        </button>
+        <button className={activeTab === "advanced" ? "primary-button" : "ghost-button"} onClick={() => setActiveTab("advanced")}>
+          高级
+        </button>
       </div>
 
-      <div className="toggle-grid">
-        <label className="toggle-card">
-          <input type="checkbox" checked={Boolean(draft.paused)} onChange={(event) => update({ paused: event.target.checked })} />
-          <span>暂停此文件夹</span>
-        </label>
-        <label className="toggle-card">
-          <input
-            type="checkbox"
-            checked={Boolean(draft.fsWatcherEnabled)}
-            onChange={(event) => update({ fsWatcherEnabled: event.target.checked })}
-          />
-          <span>启用文件监视</span>
-        </label>
-        <label className="toggle-card">
-          <input
-            type="checkbox"
-            checked={Boolean(draft.manualSync)}
-            disabled={!canReceive(draft)}
-            onChange={(event) => update({ manualSync: event.target.checked })}
-          />
-          <span>手动审核接收</span>
-        </label>
-        <label className="toggle-card">
-          <input
-            type="checkbox"
-            checked={Boolean(draft.manualPublish)}
-            disabled={!canPublish(draft)}
-            onChange={(event) => update({ manualPublish: event.target.checked })}
-          />
-          <span>手动审核发布</span>
-        </label>
-        <label className="toggle-card">
-          <input
-            type="checkbox"
-            checked={Boolean(draft.ignorePerms)}
-            onChange={(event) => update({ ignorePerms: event.target.checked })}
-          />
-          <span>忽略权限</span>
-        </label>
-        <label className="toggle-card">
-          <input
-            type="checkbox"
-            checked={Boolean(draft.ignoreDelete)}
-            onChange={(event) => update({ ignoreDelete: event.target.checked })}
-          />
-          <span>忽略删除</span>
-        </label>
-      </div>
+      {activeTab === "general" && (
+        <div className="settings-grid">
+          <label>
+            <span>文件夹名称</span>
+            <input value={draft.label ?? ""} onChange={(event) => update({ label: event.target.value })} />
+            <div className="help-block">可选的描述性名称。每个设备上的名称都可以不同。</div>
+          </label>
+          <label>
+            <span>文件夹 ID</span>
+            <input value={draft.id} disabled={!props.isNew} onChange={(event) => update({ id: event.target.value })} />
+            <div className="help-block">文件夹的必填标识符。在所有设备上都必须完全一致，且区分大小写。</div>
+          </label>
+          <label className="wide-field">
+            <span>文件夹路径</span>
+            <input value={draft.path} disabled={!props.isNew} onChange={(event) => update({ path: event.target.value })} />
+            <div className="help-block">本机上的文件夹路径。如果不存在会自动创建。1. 仅仅写【path】（无论是发送时填写，还是自动接受时的路径）在手机上都不可用，会触发 folder path missing。在电脑上是终端运行syncthing.exe执行的目录 syncthing所在的位置。，如果此文件夹是远端创建的，本机自动接受的。2 当手机上用【~/path】时 ~ 是 /storage/emulated/0/syncthing。如果自动同步到电脑上，则是[path],即少去了~。3 电脑上（~/path）是 用户目录下，比如 C:\Users\18420\path 。</div>
+          </label>
+        </div>
+      )}
 
-      <div className="panel-subsection">
-        <div className="section-title">共享设备</div>
-        <div className="share-grid">
-          {props.allDevices.length === 0 ? (
-            <div className="empty-mini">当前还没有可共享的远端设备。</div>
-          ) : (
-            props.allDevices.map((device) => {
-              const checked = (draft.devices ?? []).some((item) => item.deviceID === device.deviceID);
-              return (
-                <label key={device.deviceID} className="toggle-card share-card">
+      {activeTab === "sharing" && (
+        <div className="panel-subsection">
+          <div className="section-title">当前共享到的设备</div>
+          <div className="device-share-toolbar">
+            <div className="help-inline">取消选择设备以停止共享此文件夹。</div>
+            <div className="device-share-links">
+              <button className="link-button" onClick={() => toggleAllDevices(true, "shared")}>
+                全选
+              </button>
+              <button className="link-button" onClick={() => toggleAllDevices(false, "shared")}>
+                取消全选
+              </button>
+            </div>
+          </div>
+          <div className="share-list">
+            {sharedDevices.map((device) => (
+              <div key={device.deviceID} className="share-folder-row selected">
+                <label className="toggle-card share-card">
+                  <input type="checkbox" checked onChange={(event) => updateDeviceSelection(device.deviceID, event.target.checked)} />
+                  <span>{deviceName(device)}</span>
+                </label>
+                {completionRemoteStateLabel(remoteStateForFolder(device.deviceID)) && (
+                  <div className="help-inline">{completionRemoteStateLabel(remoteStateForFolder(device.deviceID))}</div>
+                )}
+                {device.untrusted && (
+                  <label className="share-password-field">
+                    <span>如果不受信任，请输入加密密码</span>
+                    <input
+                      type="password"
+                      value={(draft.devices ?? []).find((item) => item.deviceID === device.deviceID)?.encryptionPassword ?? ""}
+                      onChange={(event) => updateDeviceEncryptionPassword(device.deviceID, event.target.value)}
+                    />
+                  </label>
+                )}
+              </div>
+            ))}
+            {sharedDevices.length === 0 && <div className="empty-mini">当前没有已共享的设备。</div>}
+          </div>
+
+          <div className="section-title">未共享的设备</div>
+          <div className="device-share-toolbar">
+            <div className="help-inline">
+              {props.allDevices.length > 0 ? "选择额外设备以共享此文件夹。" : "当前没有可共享的远端设备。"}
+            </div>
+            {props.allDevices.length > 0 && (
+              <div className="device-share-links">
+                <button className="link-button" onClick={() => toggleAllDevices(true, "unshared")}>
+                  全选
+                </button>
+                <button className="link-button" onClick={() => toggleAllDevices(false, "unshared")}>
+                  取消全选
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="share-list">
+            {unsharedDevices.map((device) => (
+              <div key={device.deviceID} className="share-folder-row">
+                <label className="toggle-card share-card">
                   <input
                     type="checkbox"
-                    checked={checked}
+                    checked={false}
                     onChange={(event) => updateDeviceSelection(device.deviceID, event.target.checked)}
                   />
                   <span>{deviceName(device)}</span>
                 </label>
-              );
-            })
+                {device.untrusted && <div className="help-inline">如果不受信任，请输入加密密码</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {activeTab === "versioning" && (
+        <div className="settings-grid">
+          <label className="wide-field">
+            <span>文件版本控制</span>
+            <select
+              value={guiVersioning.selector}
+              onChange={(event) => updateGuiVersioning({ selector: event.target.value as FolderVersioningSelector })}
+            >
+              <option value="none">不启用文件版本控制</option>
+              <option value="trashcan">回收站版本控制</option>
+              <option value="simple">简单版本控制</option>
+              <option value="staggered">分层版本控制</option>
+              <option value="external">外部版本控制</option>
+            </select>
+            {guiVersioning.selector === "none" && <div className="help-block">不启用文件版本控制。</div>}
+            {guiVersioning.selector === "trashcan" && <div className="help-block">文件被 Syncthing 替换或删除时，会移动到 .stversions 目录中。</div>}
+            {guiVersioning.selector === "simple" && (
+              <div className="help-block">文件被 Syncthing 替换或删除时，会移动到 .stversions 目录中的日期戳版本中。</div>
+            )}
+            {guiVersioning.selector === "staggered" && (
+              <div className="help-block">
+                文件被 Syncthing 替换或删除时，会移动到 .stversions 目录中的日期戳版本中。版本会根据时间分层保留，并在超过最大保留时间时清理。
+              </div>
+            )}
+            {guiVersioning.selector === "external" && (
+              <div className="help-block">由外部命令处理版本控制。该命令必须把文件从共享文件夹中移走。</div>
+            )}
+          </label>
+
+          {(guiVersioning.selector === "trashcan" || guiVersioning.selector === "simple") && (
+            <label>
+              <span>清理周期（天）</span>
+              <input
+                type="number"
+                min={0}
+                value={guiVersioning.trashcanClean}
+                onChange={(event) => updateGuiVersioning({ trashcanClean: Number(event.target.value) || 0 })}
+              />
+              <div className="help-block">在回收站中保留文件的天数。0 表示永久保留。</div>
+            </label>
+          )}
+
+          {guiVersioning.selector === "simple" && (
+            <label>
+              <span>保留版本数</span>
+              <input
+                type="number"
+                min={1}
+                value={guiVersioning.simpleKeep}
+                onChange={(event) => updateGuiVersioning({ simpleKeep: Number(event.target.value) || 1 })}
+              />
+              <div className="help-block">每个文件保留的旧版本数量。</div>
+            </label>
+          )}
+
+          {guiVersioning.selector === "staggered" && (
+            <label>
+              <span>最大保留时间（天）</span>
+              <input
+                type="number"
+                min={0}
+                value={guiVersioning.staggeredMaxAge}
+                onChange={(event) => updateGuiVersioning({ staggeredMaxAge: Number(event.target.value) || 0 })}
+              />
+              <div className="help-block">版本的最大保留时间。0 表示永久保留。</div>
+            </label>
+          )}
+
+          {internalVersioningEnabled && (
+            <>
+              <label className="wide-field">
+                <span>版本路径</span>
+                <input
+                  value={draft.versioning?.fsPath ?? ""}
+                  onChange={(event) => update({ versioning: { ...(draft.versioning ?? {}), fsPath: event.target.value } })}
+                />
+                <div className="help-block">版本文件保存路径。留空表示使用共享文件夹内默认的 .stversions 目录。</div>
+              </label>
+              <label>
+                <span>清理间隔（秒）</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={guiVersioning.cleanupIntervalS}
+                  onChange={(event) => updateGuiVersioning({ cleanupIntervalS: Number(event.target.value) || 0 })}
+                />
+                <div className="help-block">版本目录清理任务的运行间隔。0 表示禁用周期性清理。</div>
+              </label>
+            </>
+          )}
+
+          {guiVersioning.selector === "external" && (
+            <label className="wide-field">
+              <span>命令</span>
+              <input
+                value={guiVersioning.externalCommand}
+                onChange={(event) => updateGuiVersioning({ externalCommand: event.target.value })}
+              />
+              <div className="help-block">外部命令负责处理版本控制，并且必须把文件从共享目录中移走。</div>
+            </label>
           )}
         </div>
-      </div>
+      )}
+
+      {activeTab === "ignores" && (
+        <div className="panel-subsection">
+          {props.isNew ? (
+            <>
+              <label className="toggle-card">
+                <input type="checkbox" checked={props.addIgnores} onChange={(event) => props.onAddIgnoresChange(event.target.checked)} />
+                <span>添加忽略模式</span>
+              </label>
+              <div className="help-block">忽略模式只能在文件夹创建后真正生效。勾选后会在保存时一并写入忽略规则。</div>
+              {props.addIgnores && (
+                <label className="wide-field">
+                  <span>每行输入一条忽略规则</span>
+                  <textarea
+                    rows={8}
+                    value={props.ignoreText}
+                    onChange={(event) => props.onIgnoreTextChange(event.target.value)}
+                  />
+                </label>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="help-inline">每行一条忽略模式。</div>
+              <label className="wide-field">
+                <textarea
+                  rows={10}
+                  value={props.ignoreBusy ? "加载中..." : props.ignoreText}
+                  onChange={(event) => props.onIgnoreTextChange(event.target.value)}
+                  disabled={props.ignoreBusy}
+                />
+              </label>
+              {props.ignoreError && <div className="inline-message danger">{props.ignoreError}</div>}
+              <div className="help-block">支持的模式速查：</div>
+              <div className="help-block"><code>(?d)</code> 表示：如果阻止目录删除，则该文件可被删除。</div>
+              <div className="help-block"><code>(?i)</code> 表示：该模式按不区分大小写匹配。</div>
+              <div className="help-block"><code>!</code> 表示：反转该规则（即不要排除）。</div>
+              <div className="help-block"><code>*</code> 表示：单层通配符（只匹配单个目录层级）。</div>
+              <div className="help-block"><code>**</code> 表示：多层通配符（匹配多个目录层级）。</div>
+              <div className="help-block"><code>//</code> 表示：行首注释。</div>
+            </>
+          )}
+        </div>
+      )}
+
+      {activeTab === "advanced" && (
+        <div className="settings-grid">
+          <label className="wide-field">
+            <span>扫描</span>
+            <div className="settings-columns">
+              <label className="toggle-card">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.fsWatcherEnabled)}
+                  onChange={(event) => update({ fsWatcherEnabled: event.target.checked })}
+                />
+                <span>监视文件变化</span>
+              </label>
+              <label>
+                <span>完全重扫间隔（秒）</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={draft.rescanIntervalS ?? 0}
+                  onChange={(event) => update({ rescanIntervalS: Number(event.target.value) || 0 })}
+                />
+              </label>
+            </div>
+            <div className="help-block">监视文件变化会通过文件系统通知发现大部分变化；完全重扫用于兜底扫描。</div>
+          </label>
+
+          <label>
+            <span>文件夹类型</span>
+            <select value={draft.type} disabled={folderTypeLocked} onChange={(event) => update({ type: event.target.value })}>
+              <option value="sendreceive">Send &amp; Receive</option>
+              <option value="sendonly">Send Only</option>
+              <option value="receiveonly">Receive Only</option>
+              <option value="receiveencrypted">Receive Encrypted</option>
+            </select>
+            {draft.type === "sendonly" && <div className="help-block">文件不会接受其他设备上的变化，但本设备上的变化会发送给其他设备。</div>}
+            {draft.type === "receiveonly" && <div className="help-block">文件从集群同步到当前设备，但本地变化不会发送给其他设备。</div>}
+            {draft.type === "receiveencrypted" && (
+              <div className="help-block">只存储和同步加密数据。所有连接设备上的文件夹必须使用相同密码，或者也设置为 Receive Encrypted。</div>
+            )}
+            {folderTypeLocked && <div className="help-block">Receive Encrypted 文件夹类型在添加后不能再修改。</div>}
+          </label>
+
+          <label>
+            <span>文件拉取顺序</span>
+            <select value={draft.order ?? "random"} disabled={draft.type === "sendonly"} onChange={(event) => update({ order: event.target.value })}>
+              <option value="random">Random</option>
+              <option value="alphabetic">Alphabetic</option>
+              <option value="smallestFirst">Smallest First</option>
+              <option value="largestFirst">Largest First</option>
+              <option value="oldestFirst">Oldest First</option>
+              <option value="newestFirst">Newest First</option>
+            </select>
+            {draft.type === "sendonly" && <div className="help-block">当文件夹类型为 Send Only 时，此功能不可用。</div>}
+          </label>
+
+          <label>
+            <span>最小可用磁盘空间</span>
+            <div className="inline-field">
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                value={draft.minDiskFree?.value ?? 0}
+                onChange={(event) =>
+                  update({
+                    minDiskFree: {
+                      value: Number(event.target.value) || 0,
+                      unit: draft.minDiskFree?.unit ?? "%",
+                    },
+                  })
+                }
+              />
+              <select
+                value={draft.minDiskFree?.unit ?? "%"}
+                onChange={(event) =>
+                  update({
+                    minDiskFree: {
+                      value: draft.minDiskFree?.value ?? 0,
+                      unit: event.target.value as "%" | "kB" | "MB" | "GB" | "TB",
+                    },
+                  })
+                }
+              >
+                <option value="%">%</option>
+                <option value="kB">kB</option>
+                <option value="MB">MB</option>
+                <option value="GB">GB</option>
+                <option value="TB">TB</option>
+              </select>
+            </div>
+            <div className="help-block">当文件夹所在分区剩余空间低于此值时，Syncthing 将停止接收新数据。设为 0 表示不限制。百分比是相对于总磁盘容量。</div>
+          </label>
+
+            <div className="toggle-grid wide-field">
+            <div className="toggle-item">
+              <label className="toggle-card">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.manualSync)}
+                  disabled={!canReceive(draft)}
+                  onChange={(event) => update({ manualSync: event.target.checked })}
+                />
+                <span>手动审核接收（以当前设备为基准）</span>
+              </label>
+              <div className="help-block">启用后，远端设备的变化不会自动同步到本设备，需要手动审核确认后才应用。仅控制接收方向。</div>
+            </div>
+            <div className="toggle-item">
+              <label className="toggle-card">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.manualPublish)}
+                  disabled={!canPublish(draft)}
+                  onChange={(event) => update({ manualPublish: event.target.checked })}
+                />
+                <span>手动审核发布（以当前设备为基准）</span>
+              </label>
+              <div className="help-block">启用后，本设备上的变化不会自动发布给其他设备，需要手动审核确认后才公开。仅控制发送方向。</div>
+            </div>
+            <div className="toggle-item">
+              <label className="toggle-card">
+                <input type="checkbox" checked={Boolean(draft.paused)} onChange={(event) => update({ paused: event.target.checked })} />
+                <span>暂停此文件夹</span>
+              </label>
+              <div className="help-block">暂停后本文件夹停止同步，但不会删除已同步的文件。恢复后自动继续。</div>
+            </div>
+            <div className="toggle-item">
+              <label className="toggle-card">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.ignorePerms)}
+                  onChange={(event) => update({ ignorePerms: event.target.checked })}
+                />
+                <span>忽略权限</span>
+              </label>
+              <div className="help-block">禁用文件权限的比较与同步。适用于不支持或自定义权限的文件系统（如 FAT、exFAT、Synology、Android）。Receive Encrypted 类型自动启用。</div>
+            </div>
+            <div className="toggle-item">
+              <label className="toggle-card">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.ignoreDelete)}
+                  onChange={(event) => update({ ignoreDelete: event.target.checked })}
+                />
+                <span>忽略删除</span>
+              </label>
+              <div className="help-block">启用后，其他设备上的删除操作不会同步到本设备。相当于本设备对所有文件只进不出（仅新增和修改会同步，删除被忽略）。</div>
+            </div>
+            <div className="toggle-item">
+              <label className="toggle-card">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.autoNormalize)}
+                  onChange={(event) => update({ autoNormalize: event.target.checked })}
+                />
+                <span>自动规范化文件名</span>
+              </label>
+              <div className="help-block">自动将文件名中不兼容当前操作系统的字符替换为等效字符。例如 Windows 不允许文件名含 <code>:</code>、<code>*</code> 等字符，开启后会自动处理。</div>
+            </div>
+            <div className="toggle-item">
+              <label className="toggle-card">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.syncOwnership)}
+                  disabled={draft.type === "sendonly" || draft.type === "receiveencrypted"}
+                  onChange={(event) => update({ syncOwnership: event.target.checked })}
+                />
+                <span>同步所有权</span>
+              </label>
+              <div className="help-block">同时发送和接收文件的所有者/组信息（uid/gid）。通常需要以提升权限（root 或管理员）运行 Syncthing 才能生效。</div>
+              {(draft.type === "sendonly" || draft.type === "receiveencrypted") && (
+                <div className="help-block">文件夹类型为 Send Only 或 Receive Encrypted 时不可用。</div>
+              )}
+            </div>
+            <div className="toggle-item">
+              <label className="toggle-card">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.sendOwnership || draft.syncOwnership)}
+                  disabled={draft.type === "receiveonly" || draft.type === "receiveencrypted" || Boolean(draft.syncOwnership)}
+                  onChange={(event) => update({ sendOwnership: event.target.checked })}
+                />
+                <span>发送所有权</span>
+              </label>
+              <div className="help-block">仅发送文件的所有者/组信息给其他设备，但不应用接收到的所有权信息。可能对性能有显著影响。开启"同步所有权"时自动启用。</div>
+              {(draft.type === "receiveonly" || draft.type === "receiveencrypted") && (
+                <div className="help-block">文件夹类型为 Receive Only 或 Receive Encrypted 时不可用。</div>
+              )}
+            </div>
+            <div className="toggle-item">
+              <label className="toggle-card">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.syncXattrs)}
+                  disabled={draft.type === "sendonly" || draft.type === "receiveencrypted"}
+                  onChange={(event) => update({ syncXattrs: event.target.checked })}
+                />
+                <span>同步扩展属性</span>
+              </label>
+              <div className="help-block">同时发送和接收文件的扩展属性（xattr，如 SELinux 标签、macOS 元数据等）。可能需要以提升权限运行才能读写扩展属性。</div>
+              {(draft.type === "sendonly" || draft.type === "receiveencrypted") && (
+                <div className="help-block">文件夹类型为 Send Only 或 Receive Encrypted 时不可用。</div>
+              )}
+            </div>
+            <div className="toggle-item">
+              <label className="toggle-card">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.sendXattrs || draft.syncXattrs)}
+                  disabled={draft.type === "receiveonly" || draft.type === "receiveencrypted" || Boolean(draft.syncXattrs)}
+                  onChange={(event) => update({ sendXattrs: event.target.checked })}
+                />
+                <span>发送扩展属性</span>
+              </label>
+              <div className="help-block">仅发送文件的扩展属性给其他设备，但不应用接收到的扩展属性。可能对性能有显著影响。开启"同步扩展属性"时自动启用。</div>
+              {(draft.type === "receiveonly" || draft.type === "receiveencrypted") && (
+                <div className="help-block">文件夹类型为 Receive Only 或 Receive Encrypted 时不可用。</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -5087,6 +6254,11 @@ function FolderSettingsPanel(props: {
 function DeviceSettingsPanel(props: {
   draft: DeviceConfig;
   onChange: (value: DeviceConfig) => void;
+  shareDraft: DeviceShareDraft;
+  onShareDraftChange: (value: DeviceShareDraft) => void;
+  allFolders: FolderConfig[];
+  allDevices: DeviceConfig[];
+  completions: Record<string, Record<string, CompletionStatus>>;
   onClose: () => void;
   onSave: () => void;
   busy: boolean;
@@ -5096,8 +6268,52 @@ function DeviceSettingsPanel(props: {
 }) {
   const draft = props.draft;
   const update = (patch: Partial<DeviceConfig>) => props.onChange({ ...draft, ...patch });
-  const addresses = (draft.addresses ?? ["dynamic"]).join("\n");
+  const [activeTab, setActiveTab] = useState<DeviceEditorTab>("general");
+  const addresses = (draft.addresses ?? ["dynamic"]).join(", ");
   const allowedNetworks = (draft.allowedNetworks ?? []).join("\n");
+  const willBeReintroducedBy = useMemo(() => {
+    if (!draft.introducedBy) {
+      return "";
+    }
+    const introducerDevice = props.allDevices.find((device) => device.deviceID === draft.introducedBy);
+    return introducerDevice && introducerDevice.introducer ? deviceName(introducerDevice) : "";
+  }, [draft.introducedBy, props.allDevices]);
+  const sharedFolders = useMemo(
+    () => props.allFolders.filter((folder) => props.shareDraft.selected[folder.id]),
+    [props.allFolders, props.shareDraft.selected],
+  );
+  const unsharedFolders = useMemo(
+    () => props.allFolders.filter((folder) => !props.shareDraft.selected[folder.id]),
+    [props.allFolders, props.shareDraft.selected],
+  );
+  const updateShareSelection = (folderID: string, selected: boolean) => {
+    props.onShareDraftChange({
+      ...props.shareDraft,
+      selected: {
+        ...props.shareDraft.selected,
+        [folderID]: selected,
+      },
+    });
+  };
+  const updateSharePassword = (folderID: string, value: string) => {
+    props.onShareDraftChange({
+      ...props.shareDraft,
+      encryptionPasswords: {
+        ...props.shareDraft.encryptionPasswords,
+        [folderID]: value,
+      },
+    });
+  };
+  const selectAllSharedState = (selected: boolean) => {
+    const nextSelected: Record<string, boolean> = { ...props.shareDraft.selected };
+    for (const folder of props.allFolders) {
+      nextSelected[folder.id] = selected;
+    }
+    props.onShareDraftChange({
+      ...props.shareDraft,
+      selected: nextSelected,
+    });
+  };
 
   return (
     <section className="panel surface workspace-panel">
@@ -5123,120 +6339,230 @@ function DeviceSettingsPanel(props: {
 
       {props.message && <div className="inline-message info">{props.message}</div>}
 
-      <div className="settings-grid">
-        <label>
-          <span>设备名称</span>
-          <input value={draft.name ?? ""} onChange={(event) => update({ name: event.target.value })} />
-        </label>
-        <label className="wide-field">
-          <span>设备 ID</span>
-          <input value={draft.deviceID} disabled={!props.isNew} onChange={(event) => update({ deviceID: event.target.value })} />
-        </label>
-        <label className="wide-field">
-          <span>地址列表（每行一个）</span>
-          <textarea
-            rows={4}
-            value={addresses}
-            onChange={(event) =>
-              update({
-                addresses: event.target.value
-                  .split(/\r?\n/)
-                  .map((value) => value.trim())
-                  .filter(Boolean),
-              })
-            }
-          />
-        </label>
-        <label className="wide-field">
-          <span>允许网络（每行一个）</span>
-          <textarea
-            rows={3}
-            value={allowedNetworks}
-            onChange={(event) =>
-              update({
-                allowedNetworks: event.target.value
-                  .split(/\r?\n/)
-                  .map((value) => value.trim())
-                  .filter(Boolean),
-              })
-            }
-          />
-        </label>
-        <label>
-          <span>发送限速（KiB/s）</span>
-          <input
-            type="number"
-            min={0}
-            value={draft.maxSendKbps ?? 0}
-            onChange={(event) => update({ maxSendKbps: Number(event.target.value) || 0 })}
-          />
-        </label>
-        <label>
-          <span>接收限速（KiB/s）</span>
-          <input
-            type="number"
-            min={0}
-            value={draft.maxRecvKbps ?? 0}
-            onChange={(event) => update({ maxRecvKbps: Number(event.target.value) || 0 })}
-          />
-        </label>
-        <label>
-          <span>连接数</span>
-          <input
-            type="number"
-            min={0}
-            value={draft.numConnections ?? 0}
-            onChange={(event) => update({ numConnections: Number(event.target.value) || 0 })}
-          />
-        </label>
-        <label>
-          <span>压缩</span>
-          <select value={draft.compression ?? "metadata"} onChange={(event) => update({ compression: event.target.value })}>
-            <option value="metadata">仅元数据</option>
-            <option value="always">始终压缩</option>
-            <option value="never">不压缩</option>
-          </select>
-        </label>
+      <div className="editor-tabs">
+        <button className={`tab-button${activeTab === "general" ? " active" : ""}`} onClick={() => setActiveTab("general")}>
+          常规
+        </button>
+        <button className={`tab-button${activeTab === "sharing" ? " active" : ""}`} onClick={() => setActiveTab("sharing")}>
+          共享
+        </button>
+        <button className={`tab-button${activeTab === "advanced" ? " active" : ""}`} onClick={() => setActiveTab("advanced")}>
+          高级
+        </button>
       </div>
 
-      <div className="toggle-grid">
-        <label className="toggle-card">
-          <input type="checkbox" checked={Boolean(draft.paused)} onChange={(event) => update({ paused: event.target.checked })} />
-          <span>暂停此设备</span>
-        </label>
-        <label className="toggle-card">
-          <input
-            type="checkbox"
-            checked={Boolean(draft.introducer)}
-            onChange={(event) => update({ introducer: event.target.checked })}
-          />
-          <span>设为引入者</span>
-        </label>
-        <label className="toggle-card">
-          <input
-            type="checkbox"
-            checked={Boolean(draft.autoAcceptFolders)}
-            onChange={(event) => update({ autoAcceptFolders: event.target.checked })}
-          />
-          <span>自动接受文件夹</span>
-        </label>
-        <label className="toggle-card">
-          <input
-            type="checkbox"
-            checked={Boolean(draft.skipIntroductionRemovals)}
-            onChange={(event) => update({ skipIntroductionRemovals: event.target.checked })}
-          />
-          <span>跳过引入移除</span>
-        </label>
-        <label className="toggle-card">
-          <input
-            type="checkbox"
-            checked={Boolean(draft.untrusted)}
-            onChange={(event) => update({ untrusted: event.target.checked })}
-          />
-          <span>不受信任设备</span>
-        </label>
-      </div>
+      {activeTab === "general" && (
+        <div className="settings-modal-stack">
+          <div className="settings-grid">
+            <label className="wide-field">
+              <span>设备 ID</span>
+              <input value={draft.deviceID} disabled={!props.isNew} onChange={(event) => update({ deviceID: event.target.value })} />
+              {props.isNew ? (
+                <div className="help-block">在另一台设备的“操作 &gt; 显示 ID”中可以找到要输入的设备 ID。添加新设备时，别忘了另一端也需要添加当前设备。</div>
+              ) : null}
+            </label>
+            <label>
+              <span>设备名称</span>
+              <input value={draft.name ?? ""} onChange={(event) => update({ name: event.target.value })} />
+              <div className="help-block">在集群状态中显示，用于替代设备 ID。若留空，则会使用设备自己广播的名称。</div>
+            </label>
+            <label>
+              <span>暂停</span>
+              <input type="checkbox" checked={Boolean(draft.paused)} onChange={(event) => update({ paused: event.target.checked })} />
+            </label>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "sharing" && (
+        <div className="settings-modal-stack">
+          <div className="settings-columns">
+            <div className="panel-subsection">
+              <label className="toggle-card">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.introducer)}
+                  disabled={Boolean(draft.untrusted)}
+                  onChange={(event) => update({ introducer: event.target.checked })}
+                />
+                <span>作为中介</span>
+              </label>
+              <div className="help-block">将中介中的设备添加到我们的设备列表中，用于相互共享的文件夹。</div>
+            </div>
+            <div className="panel-subsection">
+              <label className="toggle-card">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.autoAcceptFolders)}
+                  disabled={Boolean(draft.untrusted)}
+                  onChange={(event) => update({ autoAcceptFolders: event.target.checked })}
+                />
+                <span>自动接受</span>
+              </label>
+              <div className="help-block">当此远端设备共享一个当前设备尚不存在的新文件夹时，当前设备会自动按默认路径创建并接受该文件夹；关闭后，这类邀请会出现在“待接受共享文件夹”面板中，由你手动确认。</div>
+            </div>
+          </div>
+
+          {willBeReintroducedBy && <div className="inline-message info">{willBeReintroducedBy} 可能会重新引入此设备。</div>}
+
+          <div className="panel-subsection">
+            <div className="section-title">共享文件夹</div>
+            <div className="device-share-toolbar">
+              <span className="help-inline">取消选择文件夹以停止与此设备共享。</span>
+              <span className="device-share-links">
+                <button className="link-button" onClick={() => selectAllSharedState(true)}>全选</button>
+                <button className="link-button" onClick={() => selectAllSharedState(false)}>取消全选</button>
+              </span>
+            </div>
+            <div className="share-list">
+              {props.allFolders.length === 0 ? (
+                <div className="empty-mini">当前没有可共享的文件夹。</div>
+              ) : (
+                props.allFolders.map((folder) => {
+                  const selected = Boolean(props.shareDraft.selected[folder.id]);
+                  const completion = props.completions[draft.deviceID]?.[folder.id];
+                  return (
+                    <div key={folder.id} className={`share-folder-row${selected ? " selected" : ""}`}>
+                      <label className="toggle-card share-card">
+                        <input type="checkbox" checked={selected} onChange={(event) => updateShareSelection(folder.id, event.target.checked)} />
+                        <span>{folderLabel(folder)}</span>
+                      </label>
+                      {draft.untrusted && selected && (
+                        <label className="share-password-field">
+                          <span>如果不受信任，请输入加密密码</span>
+                          <input
+                            type="text"
+                            value={props.shareDraft.encryptionPasswords[folder.id] ?? ""}
+                            onChange={(event) => updateSharePassword(folder.id, event.target.value)}
+                          />
+                        </label>
+                      )}
+                      {completion?.remoteState === "notSharing" && <div className="help-block">远端设备尚未接受共享此文件夹。</div>}
+                      {completion?.remoteState === "paused" && <div className="help-block">远端设备已暂停此文件夹。</div>}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+            {sharedFolders.length === 0 && <div className="help-block">当前没有与此设备共享的文件夹。</div>}
+          </div>
+        </div>
+      )}
+
+      {activeTab === "advanced" && (
+        <div className="settings-modal-stack">
+          <div className="settings-grid">
+            <label className="wide-field">
+              <span>地址</span>
+              <input
+                value={addresses}
+                onChange={(event) =>
+                  update({
+                    addresses: event.target.value
+                      .split(",")
+                      .map((value) => value.trim())
+                      .filter(Boolean),
+                  })
+                }
+              />
+              <div className="help-block">输入以半角逗号分隔的（"tcp://ip:port", "tcp://host:port"）设备地址，或者输入“dynamic”以自动发现设备地址。</div>
+            </label>
+            <label>
+              <span>压缩</span>
+              <select value={draft.compression ?? "metadata"} onChange={(event) => update({ compression: event.target.value })}>
+                <option value="always">全部数据</option>
+                <option value="metadata">仅元数据</option>
+                <option value="never">关闭</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="settings-columns">
+            <div className="panel-subsection">
+              <div className="section-title">连接管理</div>
+              <label className="inline-field">
+                <span>连接数</span>
+                <span className="inline-help">帮助</span>
+              </label>
+              <input
+                type="number"
+                min={0}
+                value={draft.numConnections ?? 0}
+                onChange={(event) => update({ numConnections: Number(event.target.value) || 0 })}
+              />
+              <div className="help-block">当两台设备上的连接数均被设为大于 1 时，Syncthing 会尝试建立多个并行连接。如果两台设备上的设置的连接数不同，则会使用最大的连接数。设为 0 表示让 Syncthing 自行决定。</div>
+            </div>
+
+            <div className="panel-subsection">
+              <div className="section-title">设备速率限制</div>
+              <label>
+                <span>传入速率限制（KiB/s）</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={draft.maxRecvKbps ?? 0}
+                  onChange={(event) => update({ maxRecvKbps: Number(event.target.value) || 0 })}
+                />
+              </label>
+              <label>
+                <span>传出速率限制（KiB/s）</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={draft.maxSendKbps ?? 0}
+                  onChange={(event) => update({ maxSendKbps: Number(event.target.value) || 0 })}
+                />
+              </label>
+              <div className="help-block">速率限制适用于到此设备的所有连接的累积流量。</div>
+            </div>
+          </div>
+
+          <div className="panel-subsection">
+            <label className="toggle-card">
+              <input
+                type="checkbox"
+                checked={Boolean(draft.untrusted)}
+                onChange={(event) =>
+                  update({
+                    untrusted: event.target.checked,
+                    introducer: event.target.checked ? false : draft.introducer,
+                    autoAcceptFolders: event.target.checked ? false : draft.autoAcceptFolders,
+                  })
+                }
+              />
+              <span>不受信任</span>
+            </label>
+            <div className="help-block">与此设备共享的所有文件夹都必须有密码保护，这样所有发送的数据在没有密码的情况下是不可读的。</div>
+          </div>
+
+          <div className="panel-subsection">
+            <label className="toggle-card">
+              <input
+                type="checkbox"
+                checked={Boolean(draft.skipIntroductionRemovals)}
+                onChange={(event) => update({ skipIntroductionRemovals: event.target.checked })}
+              />
+              <span>跳过引入移除</span>
+            </label>
+          </div>
+
+          <label className="wide-field">
+            <span>允许网络（每行一个）</span>
+            <textarea
+              rows={3}
+              value={allowedNetworks}
+              onChange={(event) =>
+                update({
+                  allowedNetworks: event.target.value
+                    .split(/\r?\n/)
+                    .map((value) => value.trim())
+                    .filter(Boolean),
+                })
+              }
+            />
+          </label>
+        </div>
+      )}
     </section>
   );
 }

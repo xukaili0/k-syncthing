@@ -158,8 +158,11 @@ func buildPendingPublishEntries(m *model, folder string, localFiles map[string]p
 }
 
 func pendingPublishSettled(entry PendingPublishEntry, modTimeWindow time.Duration) bool {
-	if entry.Local == nil || entry.Global == nil {
+	if entry.Local == nil {
 		return false
+	}
+	if entry.Global == nil {
+		return entry.Local.IsDeleted()
 	}
 	if entry.Local.IsDeleted() && entry.Global.IsDeleted() {
 		return true
