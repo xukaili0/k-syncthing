@@ -10,13 +10,16 @@ import {
   DeviceConnection,
   DeviceConfig,
   DeviceStatistics,
+  DownloadProgressData,
   FolderConfig,
   FolderStatus,
   IgnoreResponse,
+  ItemFinishedData,
   OptionsConfig,
   PendingFoldersResponse,
   PendingPublishEntry,
   PendingPublishResult,
+  SyncthingEvent,
   SystemStatus,
   VersionResponse,
   deleteJSON,
@@ -962,8 +965,6 @@ type BiDiffTask = {
   updatedAt: number;
 };
 
-type TaskPanelTab = "running" | "done";
-
 type BiDiffTreeNode = {
   key: string;
   name: string;
@@ -1676,6 +1677,15 @@ function App() {
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [version, setVersion] = useState<VersionResponse | null>(null);
   const [connections, setConnections] = useState<ConnectionsResponse | null>(null);
+  const [connectionRates, setConnectionRates] = useState<Record<string, { inbps: number; outbps: number }>>({});
+  const prevConnectionsRef = useRef<{ data: ConnectionsResponse; time: number } | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<DownloadProgressData>({});
+  const [uploadProgress, setUploadProgress] = useState<Record<string, Record<string, { bytesDone: number; bytesTotal: number; total: number; pulled: number; pulling: number }>>>({});
+  const [itemFinishedLog, setItemFinishedLog] = useState<Array<{ folder: string; item: string; action: string; at: number }>>([]);
+  const downloadProgressRef = useRef(downloadProgress);
+  downloadProgressRef.current = downloadProgress;
+  const uploadProgressRef = useRef(uploadProgress);
+  uploadProgressRef.current = uploadProgress;
   const [folderStatuses, setFolderStatuses] = useState<Record<string, FolderStatus>>({});
   const [completions, setCompletions] = useState<Record<string, Record<string, CompletionStatus>>>({});
   const [deviceStats, setDeviceStats] = useState<Record<string, DeviceStatistics>>({});
@@ -1711,6 +1721,7 @@ function App() {
   const [bidiffMessage, setBiDiffMessage] = useState("");
   const [bidiffTasks, setBiDiffTasks] = useState<Record<string, BiDiffTask>>({});
   const [bidiffAutoRefreshPaused, setBidiffAutoRefreshPaused] = useState(false);
+  const [bidiffWorkbenchView, setBidiffWorkbenchView] = useState<"diff" | "transfer">("diff");
 
   const [peerDiff, setPeerDiff] = useState<BiDiffResult | null>(null);
   const [peerDiffBusy, setPeerDiffBusy] = useState(false);
@@ -1721,6 +1732,7 @@ function App() {
   const [peerDiffMessage, setPeerDiffMessage] = useState("");
   const [peerDiffTasks, setPeerDiffTasks] = useState<Record<string, BiDiffTask>>({});
   const [peerDiffAutoRefreshPaused, setPeerDiffAutoRefreshPaused] = useState(false);
+  const [peerWorkbenchView, setPeerWorkbenchView] = useState<"diff" | "transfer">("diff");
 
   const [publish, setPublish] = useState<PendingPublishResult | null>(null);
   const [publishBusy, setPublishBusy] = useState(false);
@@ -1924,6 +1936,30 @@ function App() {
       setConfig(nextConfig);
       setSystem(nextSystem);
       setVersion(nextVersion);
+
+      // Compute transfer rates from snapshot diff
+      const now = Date.now();
+      const prev = prevConnectionsRef.current;
+      if (prev) {
+        const td = (now - prev.time) / 1000;
+        if (td > 0) {
+          const rates: Record<string, { inbps: number; outbps: number }> = {};
+          for (const [id, conn] of Object.entries(nextConnections.connections)) {
+            const old = prev.data.connections[id];
+            if (old && conn.connected && old.connected) {
+              rates[id] = {
+                inbps: Math.max(0, (conn.inBytesTotal - old.inBytesTotal) / td),
+                outbps: Math.max(0, (conn.outBytesTotal - old.outBytesTotal) / td),
+              };
+            } else {
+              rates[id] = { inbps: 0, outbps: 0 };
+            }
+          }
+          setConnectionRates(rates);
+        }
+      }
+      prevConnectionsRef.current = { data: nextConnections, time: now };
+
       setConnections(nextConnections);
       setDeviceStats(nextDeviceStats);
       setPendingFolders(nextPendingFolders);
@@ -2169,6 +2205,65 @@ function App() {
   useEffect(() => {
     void loadBootstrap();
   }, [loadBootstrap]);
+
+  // Poll for DownloadProgress and ItemFinished events
+  const lastEventIdRef = useRef(0);
+  useEffect(() => {
+    if (!authenticated) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const since = lastEventIdRef.current;
+        const url = `/rest/events?since=${since}&limit=50&timeout=0&events=DownloadProgress,RemoteDownloadProgress,ItemFinished`;
+        const events = await getJSON<SyncthingEvent[]>(url);
+        if (cancelled || !events || events.length === 0) return;
+        let maxId = since;
+        let progressChanged = false;
+        let uploadChanged = false;
+        let newProgress = downloadProgressRef.current;
+        let newUpload = { ...uploadProgressRef.current };
+        const newFinished: Array<{ folder: string; item: string; action: string; at: number }> = [];
+        for (const ev of events) {
+          if (ev.id > maxId) maxId = ev.id;
+          if (ev.type === "DownloadProgress") {
+            const data = ev.data as unknown as DownloadProgressData;
+            newProgress = data;
+            progressChanged = true;
+          } else if (ev.type === "RemoteDownloadProgress") {
+            const data = ev.data as { device: string; folder: string; state: Record<string, { total: number; reused: number; copiedFromOrigin: number; copiedFromElsewhere: number; pulled: number; pulling: number; bytesDone: number; bytesTotal: number }> };
+            if (!newUpload[data.folder]) newUpload[data.folder] = {};
+            for (const [file, prog] of Object.entries(data.state)) {
+              newUpload[data.folder][`${data.device}/${file}`] = prog;
+            }
+            uploadChanged = true;
+          } else if (ev.type === "ItemFinished") {
+            const data = ev.data as unknown as ItemFinishedData;
+            if (!data.error) {
+              newFinished.push({ folder: data.folder, item: data.item, action: data.action, at: new Date(ev.time).getTime() });
+            }
+          }
+        }
+        lastEventIdRef.current = maxId;
+        if (progressChanged) {
+          setDownloadProgress(newProgress);
+        }
+        if (uploadChanged) {
+          setUploadProgress(newUpload);
+        }
+        if (newFinished.length > 0) {
+          setItemFinishedLog((prev) => {
+            const merged = [...newFinished, ...prev];
+            return merged.slice(0, 200);
+          });
+        }
+      } catch {
+        // ignore polling errors
+      }
+    };
+    const handle = window.setInterval(poll, 2000);
+    poll();
+    return () => { cancelled = true; window.clearInterval(handle); };
+  }, [authenticated]);
 
   useEffect(() => {
     if (!config || selectedFolderId) {
@@ -3209,11 +3304,11 @@ function App() {
                       </div>
                       <div className="device-detail-row">
                         <span className="detail-label">下行速率</span>
-                        <span className="detail-value">{formatRate(connection?.inbps)}</span>
+                        <span className="detail-value">{formatRate(connectionRates[device.deviceID]?.inbps ?? connection?.inbps)}</span>
                       </div>
                       <div className="device-detail-row">
                         <span className="detail-label">上行速率</span>
-                        <span className="detail-value">{formatRate(connection?.outbps)}</span>
+                        <span className="detail-value">{formatRate(connectionRates[device.deviceID]?.outbps ?? connection?.outbps)}</span>
                       </div>
                       <div className="device-detail-row">
                         <span className="detail-label">远端状态</span>
@@ -3568,8 +3663,22 @@ function App() {
               label={`裁决 · ${folderLabel(selectedFolder)}`}
               device={selectedDevice}
               connection={selectedDeviceId ? connections?.connections[selectedDeviceId] : undefined}
+              rates={selectedDeviceId ? connectionRates[selectedDeviceId] : undefined}
               stats={titleBarStats}
             />
+          }
+          titleExtra={
+            <>
+              <button className={bidiffWorkbenchView === "diff" ? "primary-button compact-button" : "ghost-button compact-button"} onClick={() => setBidiffWorkbenchView("diff")}>差异</button>
+              <button className={bidiffWorkbenchView === "transfer" ? "primary-button compact-button" : "ghost-button compact-button"} onClick={() => setBidiffWorkbenchView("transfer")}>
+                传输
+                {(Object.keys(downloadProgress).length > 0 || Object.keys(uploadProgress).length > 0) && (
+                  <span className="badge tone-info" style={{ marginLeft: 6, fontSize: "0.7rem" }}>
+                    {Object.values(downloadProgress).reduce((sum, folder) => sum + Object.keys(folder).length, 0) + Object.values(uploadProgress).reduce((sum, folder) => sum + Object.keys(folder).length, 0)}
+                  </span>
+                )}
+              </button>
+            </>
           }
           onClose={() => {
             setBiDiffModalOpen(false);
@@ -3614,6 +3723,12 @@ function App() {
             autoRefreshPaused={bidiffAutoRefreshPaused}
             onToggleAutoRefreshPaused={() => setBidiffAutoRefreshPaused((previous) => !previous)}
             titleStats={setTitleBarStats}
+            downloadProgress={downloadProgress}
+            uploadProgress={uploadProgress}
+            itemFinishedLog={itemFinishedLog}
+            connectionRates={selectedDeviceId ? connectionRates[selectedDeviceId] : undefined}
+            workbenchView={bidiffWorkbenchView}
+            onWorkbenchViewChange={setBidiffWorkbenchView}
           />
         </ModalShell>
       )}
@@ -3625,9 +3740,23 @@ function App() {
               label={`对等 · ${folderLabel(selectedFolder)}`}
               device={selectedDevice}
               connection={selectedDeviceId ? connections?.connections[selectedDeviceId] : undefined}
+              rates={selectedDeviceId ? connectionRates[selectedDeviceId] : undefined}
               stats={titleBarStats}
               isPeer
             />
+          }
+          titleExtra={
+            <>
+              <button className={peerWorkbenchView === "diff" ? "primary-button compact-button" : "ghost-button compact-button"} onClick={() => setPeerWorkbenchView("diff")}>差异</button>
+              <button className={peerWorkbenchView === "transfer" ? "primary-button compact-button" : "ghost-button compact-button"} onClick={() => setPeerWorkbenchView("transfer")}>
+                传输
+                {(Object.keys(downloadProgress).length > 0 || Object.keys(uploadProgress).length > 0) && (
+                  <span className="badge tone-info" style={{ marginLeft: 6, fontSize: "0.7rem" }}>
+                    {Object.values(downloadProgress).reduce((sum, folder) => sum + Object.keys(folder).length, 0) + Object.values(uploadProgress).reduce((sum, folder) => sum + Object.keys(folder).length, 0)}
+                  </span>
+                )}
+              </button>
+            </>
           }
           onClose={() => {
             setPeerDiffModalOpen(false);
@@ -3672,6 +3801,12 @@ function App() {
             autoRefreshPaused={peerDiffAutoRefreshPaused}
             onToggleAutoRefreshPaused={() => setPeerDiffAutoRefreshPaused((previous) => !previous)}
             titleStats={setTitleBarStats}
+            downloadProgress={downloadProgress}
+            uploadProgress={uploadProgress}
+            itemFinishedLog={itemFinishedLog}
+            connectionRates={selectedDeviceId ? connectionRates[selectedDeviceId] : undefined}
+            workbenchView={peerWorkbenchView}
+            onWorkbenchViewChange={setPeerWorkbenchView}
           />
         </ModalShell>
       )}
@@ -4292,6 +4427,143 @@ function ReceiveReviewPanel(props: {
   );
 }
 
+function TransferPanel(props: {
+  folderId: string;
+  downloadProgress?: Record<string, Record<string, { total: number; reused: number; copiedFromOrigin: number; copiedFromElsewhere: number; pulled: number; pulling: number; bytesDone: number; bytesTotal: number }>>;
+  uploadProgress?: Record<string, Record<string, { bytesDone: number; bytesTotal: number; total: number; pulled: number; pulling: number }>>;
+  itemFinishedLog?: Array<{ folder: string; item: string; action: string; at: number }>;
+  connectionRates?: { inbps: number; outbps: number };
+}) {
+  const folderDownload = props.downloadProgress?.[props.folderId] ?? {};
+  const folderUpload = props.uploadProgress?.[props.folderId] ?? {};
+  const downloadingFiles = Object.entries(folderDownload).map(([path, p]) => ({
+    path,
+    direction: "download" as const,
+    ...p,
+    percent: p.bytesTotal > 0 ? Math.round((100 * p.bytesDone) / p.bytesTotal) : 0,
+  }));
+  const uploadingFiles = Object.entries(folderUpload).map(([key, p]) => ({
+    path: key.includes("/") ? key.slice(key.indexOf("/") + 1) : key,
+    direction: "upload" as const,
+    ...p,
+    percent: p.bytesTotal > 0 ? Math.round((100 * p.bytesDone) / p.bytesTotal) : 0,
+  }));
+  const activeFiles = [...downloadingFiles, ...uploadingFiles];
+  const totalBytesDone = activeFiles.reduce((s, f) => s + f.bytesDone, 0);
+  const totalBytesTotal = activeFiles.reduce((s, f) => s + f.bytesTotal, 0);
+  const totalPulled = activeFiles.reduce((s, f) => s + f.pulled, 0);
+  const totalBlocks = activeFiles.reduce((s, f) => s + f.total, 0);
+  const recentlyFinished = (props.itemFinishedLog ?? []).filter((item) => item.folder === props.folderId).slice(0, 30);
+  const formatSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  };
+  return (
+    <div className="transfer-panel">
+      <div className="panel-subsection">
+        <div className="section-title">传输概览</div>
+        <div className="transfer-stats-grid">
+          <div className="transfer-stat">
+            <span className="transfer-stat-label">正在下载</span>
+            <span className="transfer-stat-value">{downloadingFiles.length} 个文件</span>
+          </div>
+          <div className="transfer-stat">
+            <span className="transfer-stat-label">正在上传</span>
+            <span className="transfer-stat-value">{uploadingFiles.length} 个文件</span>
+          </div>
+          <div className="transfer-stat">
+            <span className="transfer-stat-label">已传输 / 总量</span>
+            <span className="transfer-stat-value">{formatSize(totalBytesDone)} / {formatSize(totalBytesTotal)}</span>
+          </div>
+          <div className="transfer-stat">
+            <span className="transfer-stat-label">已拉取块</span>
+            <span className="transfer-stat-value">{totalPulled} / {totalBlocks}</span>
+          </div>
+          <div className="transfer-stat">
+            <span className="transfer-stat-label">下行速率</span>
+            <span className="transfer-stat-value">{formatRate(props.connectionRates?.inbps)}</span>
+          </div>
+          <div className="transfer-stat">
+            <span className="transfer-stat-label">上行速率</span>
+            <span className="transfer-stat-value">{formatRate(props.connectionRates?.outbps)}</span>
+          </div>
+        </div>
+      </div>
+
+      {downloadingFiles.length > 0 && (
+        <div className="panel-subsection">
+          <div className="section-title">正在下载 ({downloadingFiles.length})</div>
+          <div className="transfer-file-list">
+            {downloadingFiles.map((file) => (
+              <div key={file.path} className="transfer-file-item">
+                <div className="transfer-file-header">
+                  <span className="transfer-file-path" title={file.path}>{file.path}</span>
+                  <span className="transfer-file-percent">{file.percent}%</span>
+                </div>
+                <div className="transfer-progress-bar">
+                  <div className="transfer-progress-fill" style={{ width: `${file.percent}%` }} />
+                </div>
+                <div className="transfer-file-detail">
+                  {formatSize(file.bytesDone)} / {formatSize(file.bytesTotal)}
+                  {" · 块"} {file.pulled} / {file.total}
+                  {file.pulling > 0 && ` · 传输中 ${file.pulling}`}
+                  {file.reused > 0 && ` · 复用 ${file.reused}`}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {uploadingFiles.length > 0 && (
+        <div className="panel-subsection">
+          <div className="section-title">正在上传 ({uploadingFiles.length})</div>
+          <div className="transfer-file-list">
+            {uploadingFiles.map((file) => (
+              <div key={file.path} className="transfer-file-item">
+                <div className="transfer-file-header">
+                  <span className="transfer-file-path" title={file.path}>{file.path}</span>
+                  <span className="transfer-file-percent">{file.percent}%</span>
+                </div>
+                <div className="transfer-progress-bar">
+                  <div className="transfer-progress-fill" style={{ width: `${file.percent}%` }} />
+                </div>
+                <div className="transfer-file-detail">
+                  {formatSize(file.bytesDone)} / {formatSize(file.bytesTotal)}
+                  {" · 块"} {file.pulled} / {file.total}
+                  {file.pulling > 0 && ` · 传输中 ${file.pulling}`}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {activeFiles.length === 0 && (
+        <div className="panel-subsection">
+          <div className="empty-mini">当前没有正在传输的文件。</div>
+        </div>
+      )}
+
+      {recentlyFinished.length > 0 && (
+        <div className="panel-subsection">
+          <div className="section-title">最近完成 ({recentlyFinished.length})</div>
+          <div className="transfer-file-list">
+            {recentlyFinished.map((item, i) => (
+              <div key={`${item.item}-${i}`} className="transfer-file-item finished">
+                <span className="transfer-file-path" title={item.item}>{item.item}</span>
+                <span className="transfer-file-action">{item.action === "update" ? "更新" : item.action === "delete" ? "删除" : item.action === "create" ? "创建" : item.action}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BiDiffPanel(props: {
   mode: "bidiff" | "peer";
   folder: FolderConfig;
@@ -4320,6 +4592,12 @@ function BiDiffPanel(props: {
   autoRefreshPaused: boolean;
   onToggleAutoRefreshPaused: () => void;
   titleStats?: (stats: { total: number; selected: number; leftToRight: number; rightToLeft: number; pending?: number; previewReady?: boolean }) => void;
+  downloadProgress?: Record<string, Record<string, { total: number; reused: number; copiedFromOrigin: number; copiedFromElsewhere: number; pulled: number; pulling: number; bytesDone: number; bytesTotal: number }>>;
+  uploadProgress?: Record<string, Record<string, { bytesDone: number; bytesTotal: number; total: number; pulled: number; pulling: number }>>;
+  itemFinishedLog?: Array<{ folder: string; item: string; action: string; at: number }>;
+  connectionRates?: { inbps: number; outbps: number };
+  workbenchView: "diff" | "transfer";
+  onWorkbenchViewChange: (view: "diff" | "transfer") => void;
 }) {
   const entries = useMemo(() => {
     const base = props.bidiff?.entries ?? [];
@@ -4365,18 +4643,9 @@ function BiDiffPanel(props: {
   const [columns, setColumns] = useState<ColumnDef[]>(() => biDiffColumnsForDensity(density, false));
   const mainScrollRef = useRef<HTMLDivElement | null>(null);
   const tableScrollRef = useRef<HTMLDivElement | null>(null);
-  const [taskPanelTab, setTaskPanelTab] = useState<TaskPanelTab>("running");
   const treeNodes = useMemo(() => buildBiDiffTree(entries), [entries]);
   const treeRows = useMemo(() => flattenBiDiffTree(treeNodes, expandedDirs), [treeNodes, expandedDirs]);
   const mobileRows = treeMode ? treeRows : entries.map((entry) => ({ type: "file" as const, key: `file:${entry.path}`, node: { key: `file:${entry.path}`, name: entry.path, fullPath: entry.path, type: "file" as const, entry, children: [] }, depth: 0, guides: [], isLast: true, entry }));
-  const completedTasks = useMemo(
-    () =>
-      props.allTasks
-        .filter((task) => task.status === "completed" || task.status === "failed")
-        .sort((a, b) => b.updatedAt - a.updatedAt),
-    [props.allTasks],
-  );
-  const taskPanelItems = taskPanelTab === "running" ? props.activeTasks : completedTasks;
   const rowTaskMap = useMemo(() => {
     const map = new Map<string, BiDiffTask>();
     for (const task of props.allTasks) {
@@ -4403,15 +4672,6 @@ function BiDiffPanel(props: {
       return changed ? next : previous;
     });
   }, [treeNodes]);
-
-  useEffect(() => {
-    if (taskPanelTab === "running" && props.activeTasks.length === 0 && completedTasks.length > 0) {
-      setTaskPanelTab("done");
-    }
-    if (taskPanelTab === "done" && completedTasks.length === 0) {
-      setTaskPanelTab("running");
-    }
-  }, [completedTasks.length, props.activeTasks.length, taskPanelTab]);
 
   useEffect(() => {
     if (!tableScrollRef.current) {
@@ -4443,6 +4703,16 @@ function BiDiffPanel(props: {
       style={{ gridTemplateColumns: `minmax(0, 1fr) ${sidebarCollapsed ? 56 : sidebarWidth}px` }}
     >
       <div ref={mainScrollRef} className="review-modal-main">
+        {props.workbenchView === "transfer" ? (
+          <TransferPanel
+            folderId={props.folder.id}
+            downloadProgress={props.downloadProgress}
+            uploadProgress={props.uploadProgress}
+            itemFinishedLog={props.itemFinishedLog}
+            connectionRates={props.connectionRates}
+          />
+        ) : (
+        <>
         <div className="review-toolbar review-toolbar-bidiff">
           <label>
             <span>裁决列</span>
@@ -4554,7 +4824,6 @@ function BiDiffPanel(props: {
             </select>
           </label>
         </div>
-
         <div className="review-stats">
           <span className="badge tone-info">{props.mode === "peer" ? "对等差异工作台" : "中立差异裁决"}</span>
           <span className={`badge tone-${props.bidiff?.rightConnected ? "success" : "warning"}`}>{props.bidiff?.rightConnected ? "右侧已连接" : "右侧离线"}</span>
@@ -4913,11 +5182,11 @@ function BiDiffPanel(props: {
                           <ProgressBar percent={bidiffTaskPercent(currentTask.status)} tone={bidiffTaskTone(currentTask.status)} />
                         </div>
                       )}
-                      {!entry.canApplyLeftToRight && entry.LeftToRightReason && (
-                        <div className="helper-line">采用左侧受限：{entry.LeftToRightReason}</div>
+                      {!entry.canApplyLeftToRight && entry.leftToRightReason && (
+                        <div className="helper-line">采用左侧受限：{entry.leftToRightReason}</div>
                       )}
-                      {!entry.canApplyRightToLeft && entry.RightToLeftReason && (
-                        <div className="helper-line">采用右侧受限：{entry.RightToLeftReason}</div>
+                      {!entry.canApplyRightToLeft && entry.rightToLeftReason && (
+                        <div className="helper-line">采用右侧受限：{entry.rightToLeftReason}</div>
                       )}
                     </div>
                   </td>
@@ -4934,6 +5203,8 @@ function BiDiffPanel(props: {
             </ResizableTable>
             {entries.length === 0 && !props.bidiffBusy && <div className="compare-empty">当前筛选条件下没有差异项。</div>}
           </>
+        )}
+        </>
         )}
       </div>
 
@@ -4969,34 +5240,6 @@ function BiDiffPanel(props: {
             <span className="helper-line">右侧完成度 {props.remoteCompletion?.completion ?? 0}% · 待同步 {props.remoteCompletion?.needItems ?? 0} 项</span>
             <ProgressBar percent={completionPercent(props.remoteCompletion)} tone={props.bidiff?.rightConnected ? "success" : "muted"} label="右侧进度" />
           </div>
-        </div>
-
-        <div className="review-sidebar-card">
-          <div className="task-tabs">
-            <button className={`tab-button${taskPanelTab === "running" ? " active" : ""}`} onClick={() => setTaskPanelTab("running")}>
-              处理中
-            </button>
-            <button className={`tab-button${taskPanelTab === "done" ? " active" : ""}`} onClick={() => setTaskPanelTab("done")}>
-              处理完成
-            </button>
-          </div>
-          {taskPanelItems.length === 0 ? (
-            <div className="empty-mini">{taskPanelTab === "running" ? "当前没有正在处理的裁决条目。" : "当前没有已完成或失败的裁决条目。"}</div>
-          ) : (
-            <div className="task-list">
-              {taskPanelItems.slice(0, 12).map((task) => (
-                <div key={task.key} className={`task-item tone-${bidiffTaskTone(task.status)}`}>
-                  <div className="task-item-head">
-                    <span className={`badge tone-${bidiffTaskTone(task.status)}`}>{bidiffTaskLabel(task.status)}</span>
-                    <span className="task-item-direction">{task.direction === "left-to-right" ? "左→右" : "右→左"}</span>
-                  </div>
-                  <div className="task-item-path">{task.path}</div>
-                  <ProgressBar percent={bidiffTaskPercent(task.status)} tone={bidiffTaskTone(task.status)} label="处理阶段" />
-                  {task.error && <div className="helper-line tone-danger">{task.error}</div>}
-                </div>
-              ))}
-            </div>
-          )}
         </div>
 
         <div className="review-actions">
@@ -5401,15 +5644,16 @@ function PublishReviewPanel(props: {
   );
 }
 
-function ModalShell(props: { title: ReactNode; onClose: () => void; children: ReactNode }) {
+function ModalShell(props: { title: ReactNode; titleExtra?: ReactNode; onClose: () => void; children: ReactNode }) {
   return (
     <div className="modal-backdrop" onClick={props.onClose}>
       <section className="modal-shell surface" onClick={(event) => event.stopPropagation()}>
         <div className="modal-header">
-          <div>
+          <div style={{ flex: 1, minWidth: 0 }}>
             <div className="eyebrow">工作台</div>
             <h3>{props.title}</h3>
           </div>
+          {props.titleExtra && <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>{props.titleExtra}</div>}
           <button className="ghost-button" onClick={props.onClose}>
             关闭
           </button>
@@ -5424,12 +5668,13 @@ function WorkbenchTitle(props: {
   label: string;
   device?: DeviceConfig | null;
   connection?: DeviceConnection;
+  rates?: { inbps: number; outbps: number };
   stats?: { total: number; selected: number; leftToRight: number; rightToLeft: number; pending?: number; previewReady?: boolean } | null;
   isPeer?: boolean;
 }) {
   const device = props.device ? deviceName(props.device) : "未选择设备";
-  const down = formatRate(props.connection?.inbps);
-  const up = formatRate(props.connection?.outbps);
+  const down = formatRate(props.rates?.inbps ?? props.connection?.inbps);
+  const up = formatRate(props.rates?.outbps ?? props.connection?.outbps);
   const s = props.stats;
   return (
     <span className="workbench-title-inline">

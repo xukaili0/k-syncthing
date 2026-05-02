@@ -51,7 +51,6 @@ export type FolderConfig = {
   sendXattrs?: boolean;
   junctionsAsDirs?: boolean;
   copyOwnershipFromParent?: boolean;
-  fsWatcherDelayS?: number;
   devices: FolderDevice[];
   _guiVersioning?: GuiVersioningDraft;
   _addIgnores?: boolean;
@@ -128,6 +127,24 @@ export type ConnectionsResponse = {
 export type DeviceStatistics = {
   lastSeen: string;
   lastConnectionDurationS?: number;
+};
+
+export type SyncthingEvent = {
+  id: number;
+  globalID: number;
+  time: string;
+  type: string;
+  data: Record<string, unknown>;
+};
+
+export type DownloadProgressData = Record<string, Record<string, { total: number; reused: number; copiedFromOrigin: number; copiedFromElsewhere: number; pulled: number; pulling: number; bytesDone: number; bytesTotal: number }>>;
+
+export type ItemFinishedData = {
+  folder: string;
+  item: string;
+  type: string;
+  action: string;
+  error?: string;
 };
 
 export type FolderStatus = {

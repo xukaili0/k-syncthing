@@ -1227,6 +1227,106 @@ button:disabled {
 }
 
 /* === Compare Table - Beyond Compare Style === */
+/* Transfer Panel */
+.transfer-panel {
+  padding: 0 2px;
+}
+
+.transfer-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.transfer-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.transfer-stat-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.transfer-stat-value {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.transfer-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.transfer-file-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.transfer-file-item.finished {
+  opacity: 0.7;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.transfer-file-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.transfer-file-path {
+  font-size: 0.82rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.transfer-file-percent {
+  font-size: 0.85rem;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.transfer-progress-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  margin: 4px 0;
+  overflow: hidden;
+}
+
+.transfer-progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.transfer-file-detail {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.transfer-file-action {
+  font-size: 0.75rem;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
 .compare-table-wrapper {
   overflow: auto;
   -webkit-overflow-scrolling: touch;
