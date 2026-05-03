@@ -1327,6 +1327,41 @@ button:disabled {
   flex-shrink: 0;
 }
 
+.transfer-active-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: 6px;
+  animation: transfer-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes transfer-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.transfer-progress-indeterminate {
+  overflow: hidden;
+}
+
+.transfer-progress-indeterminate .transfer-progress-fill {
+  width: 30%;
+  animation: transfer-indeterminate 1.8s ease-in-out infinite;
+}
+
+@keyframes transfer-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
+.transfer-file-time {
+  font-size: 0.7rem;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
 .compare-table-wrapper {
   overflow: auto;
   -webkit-overflow-scrolling: touch;

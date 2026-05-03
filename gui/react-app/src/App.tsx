@@ -1680,12 +1680,19 @@ function App() {
   const [connectionRates, setConnectionRates] = useState<Record<string, { inbps: number; outbps: number }>>({});
   const prevConnectionsRef = useRef<{ data: ConnectionsResponse; time: number } | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgressData>({});
-  const [uploadProgress, setUploadProgress] = useState<Record<string, Record<string, { bytesDone: number; bytesTotal: number; total: number; pulled: number; pulling: number }>>>({});
-  const [itemFinishedLog, setItemFinishedLog] = useState<Array<{ folder: string; item: string; action: string; at: number }>>([]);
+  const [uploadProgress, setUploadProgress] = useState<Record<string, Record<string, number>>>({});
+  const [completedUploads, setCompletedUploads] = useState<Array<{ folder: string; device: string; file: string; blocks: number; size: number; at: number }>>([]);
+  const [completedDownloads, setCompletedDownloads] = useState<Array<{ folder: string; item: string; action: string; size: number; at: number }>>([]);
+  const downloadFileSizeCacheRef = useRef<Record<string, number>>({}); // folder/file -> bytesTotal
+  const [uploadFileInfo, setUploadFileInfo] = useState<Record<string, { totalBlocks: number; size: number }>>({});
+  const uploadFileInfoRef = useRef(uploadFileInfo);
+  uploadFileInfoRef.current = uploadFileInfo;
   const downloadProgressRef = useRef(downloadProgress);
   downloadProgressRef.current = downloadProgress;
   const uploadProgressRef = useRef(uploadProgress);
   uploadProgressRef.current = uploadProgress;
+  const prevUploadRef = useRef<Record<string, Record<string, number>>>({});
+  const lastUploadSeenRef = useRef<Record<string, Record<string, number>>>({});
   const [folderStatuses, setFolderStatuses] = useState<Record<string, FolderStatus>>({});
   const [completions, setCompletions] = useState<Record<string, Record<string, CompletionStatus>>>({});
   const [deviceStats, setDeviceStats] = useState<Record<string, DeviceStatistics>>({});
@@ -2222,24 +2229,55 @@ function App() {
         let uploadChanged = false;
         let newProgress = downloadProgressRef.current;
         let newUpload = { ...uploadProgressRef.current };
-        const newFinished: Array<{ folder: string; item: string; action: string; at: number }> = [];
+        const prevUpload = prevUploadRef.current;
+        const newLastSeen = { ...lastUploadSeenRef.current };
+        const newCompletedDownloads: Array<{ folder: string; item: string; action: string; size: number; at: number }> = [];
+        const newCompletedUploads: Array<{ folder: string; device: string; file: string; blocks: number; size: number; at: number }> = [];
         for (const ev of events) {
           if (ev.id > maxId) maxId = ev.id;
           if (ev.type === "DownloadProgress") {
             const data = ev.data as unknown as DownloadProgressData;
             newProgress = data;
             progressChanged = true;
+            for (const [folder, files] of Object.entries(data)) {
+              for (const [file, info] of Object.entries(files)) {
+                if (info.bytesTotal > 0) {
+                  downloadFileSizeCacheRef.current[`${folder}/${file}`] = info.bytesTotal;
+                }
+              }
+            }
           } else if (ev.type === "RemoteDownloadProgress") {
-            const data = ev.data as { device: string; folder: string; state: Record<string, { total: number; reused: number; copiedFromOrigin: number; copiedFromElsewhere: number; pulled: number; pulling: number; bytesDone: number; bytesTotal: number }> };
+            const data = ev.data as { device: string; folder: string; state: Record<string, number> };
             if (!newUpload[data.folder]) newUpload[data.folder] = {};
-            for (const [file, prog] of Object.entries(data.state)) {
-              newUpload[data.folder][`${data.device}/${file}`] = prog;
+            if (!newLastSeen[data.folder]) newLastSeen[data.folder] = {};
+            newLastSeen[data.folder][data.device] = Date.now();
+            const folderState = newUpload[data.folder];
+            const devicePrefix = `${data.device}/`;
+            const prevEntries: Record<string, number> = {};
+            for (const key of Object.keys(folderState)) {
+              if (key.startsWith(devicePrefix)) {
+                prevEntries[key] = folderState[key];
+                delete folderState[key];
+              }
+            }
+            for (const [file, blockCount] of Object.entries(data.state)) {
+              const key = `${data.device}/${file}`;
+              folderState[key] = blockCount;
+              delete prevEntries[key];
+            }
+            for (const [key, blocks] of Object.entries(prevEntries)) {
+              const slashIdx = key.indexOf("/");
+              const file = slashIdx > 0 ? key.slice(slashIdx + 1) : key;
+              newCompletedUploads.push({ folder: data.folder, device: data.device, file, blocks, size: 0, at: Date.now() });
             }
             uploadChanged = true;
           } else if (ev.type === "ItemFinished") {
             const data = ev.data as unknown as ItemFinishedData;
             if (!data.error) {
-              newFinished.push({ folder: data.folder, item: data.item, action: data.action, at: new Date(ev.time).getTime() });
+              const cacheKey = `${data.folder}/${data.item}`;
+              const size = downloadFileSizeCacheRef.current[cacheKey] ?? 0;
+              delete downloadFileSizeCacheRef.current[cacheKey];
+              newCompletedDownloads.push({ folder: data.folder, item: data.item, action: data.action, size, at: new Date(ev.time).getTime() });
             }
           }
         }
@@ -2248,13 +2286,15 @@ function App() {
           setDownloadProgress(newProgress);
         }
         if (uploadChanged) {
+          prevUploadRef.current = newUpload;
+          lastUploadSeenRef.current = newLastSeen;
           setUploadProgress(newUpload);
         }
-        if (newFinished.length > 0) {
-          setItemFinishedLog((prev) => {
-            const merged = [...newFinished, ...prev];
-            return merged.slice(0, 200);
-          });
+        if (newCompletedUploads.length > 0) {
+          setCompletedUploads((prev) => [...newCompletedUploads, ...prev].slice(0, 100));
+        }
+        if (newCompletedDownloads.length > 0) {
+          setCompletedDownloads((prev) => [...newCompletedDownloads, ...prev].slice(0, 200));
         }
       } catch {
         // ignore polling errors
@@ -2264,6 +2304,78 @@ function App() {
     poll();
     return () => { cancelled = true; window.clearInterval(handle); };
   }, [authenticated]);
+
+  // Detect stale uploads per device per folder (events stopped coming)
+  useEffect(() => {
+    if (!authenticated) return;
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+      const current = uploadProgressRef.current;
+      const lastSeen = lastUploadSeenRef.current;
+      const prev = prevUploadRef.current;
+      const newCompleted: Array<{ folder: string; device: string; file: string; blocks: number; size: number; at: number }> = [];
+      for (const [folder, files] of Object.entries(current)) {
+        for (const [key, blocks] of Object.entries(files)) {
+          const slashIdx = key.indexOf("/");
+          const device = slashIdx > 0 ? key.slice(0, slashIdx) : "";
+          const file = slashIdx > 0 ? key.slice(slashIdx + 1) : key;
+          const lastDeviceSeen = lastSeen[folder]?.[device] ?? 0;
+          if (now - lastDeviceSeen > 10000) {
+            newCompleted.push({ folder, device, file, blocks, size: 0, at: now });
+            delete current[folder][key];
+          }
+        }
+        if (current[folder] && Object.keys(current[folder]).length === 0) {
+          delete current[folder];
+        }
+      }
+      if (newCompleted.length > 0) {
+        prevUploadRef.current = { ...current };
+        lastUploadSeenRef.current = { ...lastSeen };
+        setUploadProgress({ ...current });
+        setCompletedUploads((prev) => [...newCompleted, ...prev].slice(0, 100));
+      }
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [authenticated]);
+
+  // Poll file info (total blocks, size) for currently uploading files
+  useEffect(() => {
+    if (!authenticated) return;
+    const up = uploadProgress;
+    const entries: Array<{ folder: string; file: string; key: string }> = [];
+    for (const [folder, files] of Object.entries(up)) {
+      for (const key of Object.keys(files)) {
+        if (!uploadFileInfoRef.current[key]) {
+          const slashIdx = key.indexOf("/");
+          const file = slashIdx > 0 ? key.slice(slashIdx + 1) : key;
+          entries.push({ folder, file, key });
+        }
+      }
+    }
+    if (entries.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const newInfo: Record<string, { totalBlocks: number; size: number }> = {};
+      for (const { folder, file, key } of entries) {
+        if (cancelled) return;
+        try {
+          const info = await getJSON<{ global?: { size: number; numBlocks?: number }; local?: { size: number; numBlocks?: number } }>(`/rest/db/file?folder=${encodeURIComponent(folder)}&file=${encodeURIComponent(file)}`);
+          if (cancelled) return;
+          const fi = info?.global ?? info?.local;
+          if (fi && typeof fi.size === "number") {
+            newInfo[key] = { totalBlocks: fi.numBlocks ?? 0, size: fi.size };
+          }
+        } catch {
+          // ignore
+        }
+      }
+      if (!cancelled && Object.keys(newInfo).length > 0) {
+        setUploadFileInfo((prev) => ({ ...prev, ...newInfo }));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authenticated, uploadProgress]);
 
   useEffect(() => {
     if (!config || selectedFolderId) {
@@ -3725,7 +3837,9 @@ function App() {
             titleStats={setTitleBarStats}
             downloadProgress={downloadProgress}
             uploadProgress={uploadProgress}
-            itemFinishedLog={itemFinishedLog}
+            completedUploads={completedUploads}
+            uploadFileInfo={uploadFileInfo}
+            completedDownloads={completedDownloads}
             connectionRates={selectedDeviceId ? connectionRates[selectedDeviceId] : undefined}
             workbenchView={bidiffWorkbenchView}
             onWorkbenchViewChange={setBidiffWorkbenchView}
@@ -3803,7 +3917,9 @@ function App() {
             titleStats={setTitleBarStats}
             downloadProgress={downloadProgress}
             uploadProgress={uploadProgress}
-            itemFinishedLog={itemFinishedLog}
+            completedUploads={completedUploads}
+            uploadFileInfo={uploadFileInfo}
+            completedDownloads={completedDownloads}
             connectionRates={selectedDeviceId ? connectionRates[selectedDeviceId] : undefined}
             workbenchView={peerWorkbenchView}
             onWorkbenchViewChange={setPeerWorkbenchView}
@@ -4430,35 +4546,54 @@ function ReceiveReviewPanel(props: {
 function TransferPanel(props: {
   folderId: string;
   downloadProgress?: Record<string, Record<string, { total: number; reused: number; copiedFromOrigin: number; copiedFromElsewhere: number; pulled: number; pulling: number; bytesDone: number; bytesTotal: number }>>;
-  uploadProgress?: Record<string, Record<string, { bytesDone: number; bytesTotal: number; total: number; pulled: number; pulling: number }>>;
-  itemFinishedLog?: Array<{ folder: string; item: string; action: string; at: number }>;
+  uploadProgress?: Record<string, Record<string, number>>;
+  uploadFileInfo?: Record<string, { totalBlocks: number; size: number }>;
+  completedUploads?: Array<{ folder: string; device: string; file: string; blocks: number; size: number; at: number }>;
+  completedDownloads?: Array<{ folder: string; item: string; action: string; size: number; at: number }>;
   connectionRates?: { inbps: number; outbps: number };
 }) {
   const folderDownload = props.downloadProgress?.[props.folderId] ?? {};
   const folderUpload = props.uploadProgress?.[props.folderId] ?? {};
   const downloadingFiles = Object.entries(folderDownload).map(([path, p]) => ({
     path,
-    direction: "download" as const,
     ...p,
     percent: p.bytesTotal > 0 ? Math.round((100 * p.bytesDone) / p.bytesTotal) : 0,
   }));
-  const uploadingFiles = Object.entries(folderUpload).map(([key, p]) => ({
-    path: key.includes("/") ? key.slice(key.indexOf("/") + 1) : key,
-    direction: "upload" as const,
-    ...p,
-    percent: p.bytesTotal > 0 ? Math.round((100 * p.bytesDone) / p.bytesTotal) : 0,
-  }));
-  const activeFiles = [...downloadingFiles, ...uploadingFiles];
-  const totalBytesDone = activeFiles.reduce((s, f) => s + f.bytesDone, 0);
-  const totalBytesTotal = activeFiles.reduce((s, f) => s + f.bytesTotal, 0);
-  const totalPulled = activeFiles.reduce((s, f) => s + f.pulled, 0);
-  const totalBlocks = activeFiles.reduce((s, f) => s + f.total, 0);
-  const recentlyFinished = (props.itemFinishedLog ?? []).filter((item) => item.folder === props.folderId).slice(0, 30);
+  const uploadingFiles = Object.entries(folderUpload).map(([key, blockCount]) => {
+    const info = props.uploadFileInfo?.[key];
+    const totalBlocks = info?.totalBlocks ?? 0;
+    const size = info?.size ?? 0;
+    return {
+      path: key.includes("/") ? key.slice(key.indexOf("/") + 1) : key,
+      blocksDownloaded: blockCount,
+      totalBlocks,
+      size,
+      percent: totalBlocks > 0 ? Math.round((100 * blockCount) / totalBlocks) : -1,
+    };
+  });
+  const dlBytesDone = downloadingFiles.reduce((s, f) => s + f.bytesDone, 0);
+  const dlBytesTotal = downloadingFiles.reduce((s, f) => s + f.bytesTotal, 0);
+  const dlPulled = downloadingFiles.reduce((s, f) => s + f.pulled, 0);
+  const dlBlocks = downloadingFiles.reduce((s, f) => s + f.total, 0);
+  const ulBlocks = uploadingFiles.reduce((s, f) => s + f.blocksDownloaded, 0);
+  const ulTotalBlocks = uploadingFiles.reduce((s, f) => s + f.totalBlocks, 0);
+  const completedDownloadsForFolder = (props.completedDownloads ?? []).filter((d) => d.folder === props.folderId).slice(0, 30);
+  const completedUploadsForFolder = (props.completedUploads ?? []).filter((u) => u.folder === props.folderId).slice(0, 30);
   const formatSize = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  };
+  const formatTime = (ts: number) => {
+    const d = new Date(ts);
+    return `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}:${d.getSeconds().toString().padStart(2, "0")}`;
+  };
+  const formatElapsed = (ts: number) => {
+    const sec = Math.round((Date.now() - ts) / 1000);
+    if (sec < 60) return `${sec}秒前`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}分钟前`;
+    return `${Math.floor(sec / 3600)}小时前`;
   };
   return (
     <div className="transfer-panel">
@@ -4473,14 +4608,24 @@ function TransferPanel(props: {
             <span className="transfer-stat-label">正在上传</span>
             <span className="transfer-stat-value">{uploadingFiles.length} 个文件</span>
           </div>
-          <div className="transfer-stat">
-            <span className="transfer-stat-label">已传输 / 总量</span>
-            <span className="transfer-stat-value">{formatSize(totalBytesDone)} / {formatSize(totalBytesTotal)}</span>
-          </div>
-          <div className="transfer-stat">
-            <span className="transfer-stat-label">已拉取块</span>
-            <span className="transfer-stat-value">{totalPulled} / {totalBlocks}</span>
-          </div>
+          {downloadingFiles.length > 0 && (
+            <div className="transfer-stat">
+              <span className="transfer-stat-label">下载进度</span>
+              <span className="transfer-stat-value">{formatSize(dlBytesDone)} / {formatSize(dlBytesTotal)}</span>
+            </div>
+          )}
+          {downloadingFiles.length > 0 && (
+            <div className="transfer-stat">
+              <span className="transfer-stat-label">下载块</span>
+              <span className="transfer-stat-value">{dlPulled} / {dlBlocks}</span>
+            </div>
+          )}
+          {uploadingFiles.length > 0 && (
+            <div className="transfer-stat">
+              <span className="transfer-stat-label">上传块</span>
+              <span className="transfer-stat-value">{ulBlocks} / {ulTotalBlocks > 0 ? ulTotalBlocks : "?"}{ulTotalBlocks > 0 ? ` (${Math.round((100 * ulBlocks) / ulTotalBlocks)}%)` : ""}</span>
+            </div>
+          )}
           <div className="transfer-stat">
             <span className="transfer-stat-label">下行速率</span>
             <span className="transfer-stat-value">{formatRate(props.connectionRates?.inbps)}</span>
@@ -4524,16 +4669,23 @@ function TransferPanel(props: {
             {uploadingFiles.map((file) => (
               <div key={file.path} className="transfer-file-item">
                 <div className="transfer-file-header">
+                  <span className="transfer-active-dot" />
                   <span className="transfer-file-path" title={file.path}>{file.path}</span>
-                  <span className="transfer-file-percent">{file.percent}%</span>
+                  {file.percent >= 0 && <span className="transfer-file-percent">{file.percent}%</span>}
                 </div>
-                <div className="transfer-progress-bar">
-                  <div className="transfer-progress-fill" style={{ width: `${file.percent}%` }} />
-                </div>
+                {file.percent >= 0 ? (
+                  <div className="transfer-progress-bar">
+                    <div className="transfer-progress-fill" style={{ width: `${file.percent}%` }} />
+                  </div>
+                ) : (
+                  <div className="transfer-progress-bar transfer-progress-indeterminate">
+                    <div className="transfer-progress-fill" />
+                  </div>
+                )}
                 <div className="transfer-file-detail">
-                  {formatSize(file.bytesDone)} / {formatSize(file.bytesTotal)}
-                  {" · 块"} {file.pulled} / {file.total}
-                  {file.pulling > 0 && ` · 传输中 ${file.pulling}`}
+                  {file.size > 0 && `${formatSize(file.size)} · `}
+                  {file.blocksDownloaded} / {file.totalBlocks > 0 ? file.totalBlocks : "?"} 块
+                  {file.totalBlocks > 0 && ` · ${file.percent}%`}
                 </div>
               </div>
             ))}
@@ -4541,20 +4693,47 @@ function TransferPanel(props: {
         </div>
       )}
 
-      {activeFiles.length === 0 && (
+      {downloadingFiles.length === 0 && uploadingFiles.length === 0 && (
         <div className="panel-subsection">
           <div className="empty-mini">当前没有正在传输的文件。</div>
         </div>
       )}
 
-      {recentlyFinished.length > 0 && (
+      {completedUploadsForFolder.length > 0 && (
         <div className="panel-subsection">
-          <div className="section-title">最近完成 ({recentlyFinished.length})</div>
+          <div className="section-title">上传完成 ({completedUploadsForFolder.length})</div>
           <div className="transfer-file-list">
-            {recentlyFinished.map((item, i) => (
+            {completedUploadsForFolder.map((item, i) => (
+              <div key={`${item.file}-${i}`} className="transfer-file-item finished">
+                <div className="transfer-file-header">
+                  <span className="transfer-file-path" title={item.file}>{item.file}</span>
+                  <span className="transfer-file-time">{formatElapsed(item.at)}</span>
+                </div>
+                <div className="transfer-file-detail">
+                  {item.size > 0 && `${formatSize(item.size)} · `}
+                  已传 {item.blocks} 个块 · {formatTime(item.at)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {completedDownloadsForFolder.length > 0 && (
+        <div className="panel-subsection">
+          <div className="section-title">下载完成 ({completedDownloadsForFolder.length})</div>
+          <div className="transfer-file-list">
+            {completedDownloadsForFolder.map((item, i) => (
               <div key={`${item.item}-${i}`} className="transfer-file-item finished">
-                <span className="transfer-file-path" title={item.item}>{item.item}</span>
-                <span className="transfer-file-action">{item.action === "update" ? "更新" : item.action === "delete" ? "删除" : item.action === "create" ? "创建" : item.action}</span>
+                <div className="transfer-file-header">
+                  <span className="transfer-file-path" title={item.item}>{item.item}</span>
+                  <span className="transfer-file-time">{formatElapsed(item.at)}</span>
+                </div>
+                <div className="transfer-file-detail">
+                  {item.size > 0 && `${formatSize(item.size)} · `}
+                  {item.action === "update" ? "更新" : item.action === "delete" ? "删除" : item.action === "create" ? "创建" : item.action}
+                  {" · "}{formatTime(item.at)}
+                </div>
               </div>
             ))}
           </div>
@@ -4593,8 +4772,10 @@ function BiDiffPanel(props: {
   onToggleAutoRefreshPaused: () => void;
   titleStats?: (stats: { total: number; selected: number; leftToRight: number; rightToLeft: number; pending?: number; previewReady?: boolean }) => void;
   downloadProgress?: Record<string, Record<string, { total: number; reused: number; copiedFromOrigin: number; copiedFromElsewhere: number; pulled: number; pulling: number; bytesDone: number; bytesTotal: number }>>;
-  uploadProgress?: Record<string, Record<string, { bytesDone: number; bytesTotal: number; total: number; pulled: number; pulling: number }>>;
-  itemFinishedLog?: Array<{ folder: string; item: string; action: string; at: number }>;
+  uploadProgress?: Record<string, Record<string, number>>;
+  uploadFileInfo?: Record<string, { totalBlocks: number; size: number }>;
+  completedUploads?: Array<{ folder: string; device: string; file: string; blocks: number; size: number; at: number }>;
+  completedDownloads?: Array<{ folder: string; item: string; action: string; size: number; at: number }>;
   connectionRates?: { inbps: number; outbps: number };
   workbenchView: "diff" | "transfer";
   onWorkbenchViewChange: (view: "diff" | "transfer") => void;
@@ -4708,7 +4889,9 @@ function BiDiffPanel(props: {
             folderId={props.folder.id}
             downloadProgress={props.downloadProgress}
             uploadProgress={props.uploadProgress}
-            itemFinishedLog={props.itemFinishedLog}
+            uploadFileInfo={props.uploadFileInfo}
+            completedUploads={props.completedUploads}
+            completedDownloads={props.completedDownloads}
             connectionRates={props.connectionRates}
           />
         ) : (
