@@ -5008,12 +5008,12 @@ function BiDiffPanel(props: {
           </label>
         </div>
         <div className="review-stats">
-          <span className="badge tone-info">{props.mode === "peer" ? "对等差异工作台" : "中立差异裁决"}</span>
-          <span className={`badge tone-${props.bidiff?.rightConnected ? "success" : "warning"}`}>{props.bidiff?.rightConnected ? "右侧已连接" : "右侧离线"}</span>
+          <span className="badge badge-sm tone-info">{props.mode === "peer" ? "对等差异" : "裁决"}</span>
+          <span className={`badge badge-sm tone-${props.bidiff?.rightConnected ? "success" : "warning"}`}>{props.bidiff?.rightConnected ? "右侧已连接" : "右侧离线"}</span>
           {(selectedLeftToRight > 0 || selectedRightToLeft > 0 || selectedBlocked > 0) && (
-            <span>
-              当前已选：左→右 {selectedLeftToRight} / 右→左 {selectedRightToLeft}
-              {selectedBlocked > 0 ? ` / 仅选中未执行 ${selectedBlocked}` : ""}
+            <span className="review-selection-info">
+              左→右 {selectedLeftToRight} / 右→左 {selectedRightToLeft}
+              {selectedBlocked > 0 ? ` / 未执行 ${selectedBlocked}` : ""}
             </span>
           )}
           <label className="review-inline-select">
@@ -5315,7 +5315,7 @@ function BiDiffPanel(props: {
               return (
                 <tr
                   key={entry.path}
-                  className={`compare-tree-file-row tone-${statusTone(entry.status)} kind-${kind}${selected ? " selected" : ""}${currentTask ? ` task-${currentTask.status}` : ""}`}
+                  className={`compare-tree-file-row tone-${statusTone(entry.status)} kind-${kind}${selected ? " selected" : ""}${currentTask ? ` task-${currentTask.status}` : ""}${!entry.canApplyLeftToRight && !entry.canApplyRightToLeft ? " row-both-blocked" : ""}`}
                 >
                   <td className="compare-checkbox-cell">
                     <TreeCheckbox
@@ -5364,12 +5364,6 @@ function BiDiffPanel(props: {
                         <div className="compare-inline-progress">
                           <ProgressBar percent={bidiffTaskPercent(currentTask.status)} tone={bidiffTaskTone(currentTask.status)} />
                         </div>
-                      )}
-                      {!entry.canApplyLeftToRight && entry.leftToRightReason && (
-                        <div className="helper-line">采用左侧受限：{entry.leftToRightReason}</div>
-                      )}
-                      {!entry.canApplyRightToLeft && entry.rightToLeftReason && (
-                        <div className="helper-line">采用右侧受限：{entry.rightToLeftReason}</div>
                       )}
                     </div>
                   </td>
@@ -5832,12 +5826,12 @@ function ModalShell(props: { title: ReactNode; titleExtra?: ReactNode; onClose: 
     <div className="modal-backdrop" onClick={props.onClose}>
       <section className="modal-shell surface" onClick={(event) => event.stopPropagation()}>
         <div className="modal-header">
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="eyebrow">工作台</div>
+          <div className="modal-header-title">
+            <span className="eyebrow-inline">工作台</span>
             <h3>{props.title}</h3>
           </div>
-          {props.titleExtra && <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>{props.titleExtra}</div>}
-          <button className="ghost-button" onClick={props.onClose}>
+          {props.titleExtra && <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>{props.titleExtra}</div>}
+          <button className="ghost-button compact-button" onClick={props.onClose}>
             关闭
           </button>
         </div>

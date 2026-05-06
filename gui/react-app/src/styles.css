@@ -307,23 +307,40 @@ button:disabled {
 
 .modal-header {
   display: flex;
-  gap: 12px;
+  gap: 8px;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 14px;
+  padding: 5px 10px;
   border-bottom: 1px solid var(--line);
   background: rgba(255, 252, 247, 0.95);
+  min-height: 0;
 }
 
-.modal-header .eyebrow {
+.modal-header-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.eyebrow-inline {
+  color: var(--warm);
   font-size: 0.62rem;
-  letter-spacing: 0.08em;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .modal-header h3 {
-  margin: 1px 0 0;
-  font-size: 0.98rem;
+  margin: 0;
+  font-size: 0.88rem;
   line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .modal-content {
@@ -605,6 +622,7 @@ button:disabled {
 .device-detail-row .detail-label {
   color: var(--muted);
   flex-shrink: 0;
+  font-size: 0.78rem;
 }
 
 .device-detail-row .detail-value {
@@ -613,6 +631,7 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 0.78rem;
 }
 
 .device-detail-row.device-detail-row-stack {
@@ -1794,6 +1813,7 @@ button:disabled {
   padding: 0;
 }
 
+
 .compare-status-stack {
   display: grid;
   gap: 4px;
@@ -1978,6 +1998,15 @@ button:disabled {
   background: rgba(92, 107, 116, 0.68);
   flex-shrink: 0;
   margin-left: 2px;
+}
+
+.row-both-blocked .tree-file-dot {
+  background: #ff9100;
+}
+
+.row-both-blocked .compare-tree-file-name,
+.row-both-blocked .compare-tree-file-combined {
+  color: #ff9100;
 }
 
 .compact-button {
@@ -2655,6 +2684,11 @@ button:disabled {
   padding: 1px 0 4px;
   border-bottom: 1px solid var(--line);
   min-width: 0;
+}
+
+.review-selection-info {
+  font-size: 0.68rem;
+  white-space: nowrap;
 }
 
 .review-sidebar-card {

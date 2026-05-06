@@ -46,7 +46,7 @@ type OptionsConfiguration struct {
 	UpgradeToPreReleases        bool     `json:"upgradeToPreReleases" xml:"upgradeToPreReleases"`
 	KeepTemporariesH            int      `json:"keepTemporariesH" xml:"keepTemporariesH" default:"24"`
 	CacheIgnoredFiles           bool     `json:"cacheIgnoredFiles" xml:"cacheIgnoredFiles" default:"false"`
-	ProgressUpdateIntervalS     int      `json:"progressUpdateIntervalS" xml:"progressUpdateIntervalS" default:"5"`
+	ProgressUpdateIntervalS     int      `json:"progressUpdateIntervalS" xml:"progressUpdateIntervalS" default:"1"`
 	LimitBandwidthInLan         bool     `json:"limitBandwidthInLan" xml:"limitBandwidthInLan" default:"false"`
 	MinHomeDiskFree             Size     `json:"minHomeDiskFree" xml:"minHomeDiskFree" default:"1 %"`
 	ReleasesURL                 string   `json:"releasesURL" xml:"releasesURL" default:"https://upgrades.syncthing.net/meta.json"`
