@@ -1,4 +1,4 @@
-import { CSSProperties, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   BiDiffEntry,
   BiDiffResult,
@@ -10,12 +10,19 @@ import {
   DeviceConnection,
   DeviceConfig,
   DeviceStatistics,
+  DiscoveryCacheResponse,
   DownloadProgressData,
   FolderConfig,
   FolderStatus,
+  GuiConfig,
   IgnoreResponse,
+  LDAPConfig,
   ItemFinishedData,
+  MinHomeDiskFree,
+  ObservedDevice,
+  ObservedFolder,
   OptionsConfig,
+  PendingDevicesResponse,
   PendingFoldersResponse,
   PendingPublishEntry,
   PendingPublishResult,
@@ -55,7 +62,7 @@ const compareViewOptions = [
 ] as const;
 
 const bidiffViewOptions = [
-  { value: "different", label: "仅看待裁决差异" },
+  { value: "different", label: "仅看待接发差异" },
   { value: "all", label: "显示全部有效条目" },
   { value: "all-with-same", label: "显示全部（含相同）" },
   { value: "delete", label: "仅看删除 / 缺失" },
@@ -927,7 +934,7 @@ function bidiffRelationIndicator(entry: BiDiffEntry): { symbol: string; classNam
 
 function bidiffActionabilityLabel(entry: BiDiffEntry): { label: string; className: string; title: string } {
   if (entry.canApplyLeftToRight && entry.canApplyRightToLeft) {
-    return { label: "⇄", className: "action-both", title: "可双向裁决" };
+    return { label: "⇄", className: "action-both", title: "可双向接发" };
   }
   if (entry.canApplyLeftToRight) {
     return { label: "←", className: "action-left", title: "当前仅可采用左侧" };
@@ -935,7 +942,7 @@ function bidiffActionabilityLabel(entry: BiDiffEntry): { label: string; classNam
   if (entry.canApplyRightToLeft) {
     return { label: "→", className: "action-right", title: "当前仅可采用右侧" };
   }
-  return { label: "⛔", className: "action-blocked", title: "当前不可裁决" };
+  return { label: "⛔", className: "action-blocked", title: "当前不可接发" };
 }
 
 function bidiffRenameInlineText(entry: BiDiffEntry, baseLabel: string): string {
@@ -1105,7 +1112,7 @@ function collectBiDiffLeafEntries(node: BiDiffTreeNode): BiDiffEntry[] {
 function hasExpandedDirDescendant(node: BiDiffTreeNode, expanded: Record<string, boolean>): boolean {
   for (const child of node.children) {
     if (child.type === "dir") {
-      if (expanded[child.key] !== false || hasExpandedDirDescendant(child, expanded)) {
+      if (expanded[child.key] === true || hasExpandedDirDescendant(child, expanded)) {
         return true;
       }
     }
@@ -1128,7 +1135,7 @@ function flattenBiDiffTree(nodes: BiDiffTreeNode[], expanded: Record<string, boo
         isLast,
         entries: collectBiDiffLeafEntries(node),
       });
-      if (expanded[node.key] !== false) {
+      if (expanded[node.key] === true) {
         rows.push(...flattenBiDiffTree(node.children, expanded, depth + 1, [...guides, !isLast]));
       }
     } else if (node.entry) {
@@ -1220,7 +1227,7 @@ function collectReviewLeafEntries<T extends { path: string }>(node: ReviewTreeNo
 function hasExpandedReviewDirDescendant<T extends { path: string }>(node: ReviewTreeNode<T>, expanded: Record<string, boolean>): boolean {
   for (const child of node.children) {
     if (child.type === "dir") {
-      if (expanded[child.key] !== false || hasExpandedReviewDirDescendant(child, expanded)) {
+      if (expanded[child.key] === true || hasExpandedReviewDirDescendant(child, expanded)) {
         return true;
       }
     }
@@ -1248,7 +1255,7 @@ function flattenReviewTree<T extends { path: string }>(
         isLast,
         entries: collectReviewLeafEntries(node),
       });
-      if (expanded[node.key] !== false) {
+      if (expanded[node.key] === true) {
         rows.push(...flattenReviewTree(node.children, expanded, depth + 1, [...guides, !isLast]));
       }
     } else if (node.entry) {
@@ -1395,7 +1402,7 @@ function biDiffColumnsForDensity(density: BiDiffDensity, actionVisible = false):
     { key: "checkbox", label: "", width: preset.checkbox, minWidth: 36 },
     { key: "leftSize", label: "左侧大小", width: preset.leftSize, minWidth: 64 },
     { key: "leftTime", label: "左侧时间", width: preset.leftTime, minWidth: 76 },
-    { key: "action", label: "裁决", width: preset.action, minWidth: 48, visible: actionVisible },
+    { key: "action", label: "接发", width: preset.action, minWidth: 48, visible: actionVisible },
     { key: "summary", label: "名称 / 路径", width: preset.summary, minWidth: 180 },
     { key: "rightTime", label: "右侧时间", width: preset.rightTime, minWidth: 76 },
     { key: "rightSize", label: "右侧大小", width: preset.rightSize, minWidth: 64 },
@@ -1716,6 +1723,7 @@ function App() {
   const [compareError, setCompareError] = useState("");
   const [compareView, setCompareView] = useState("different");
   const [comparePrefix, setComparePrefix] = useState("");
+  const [compareIgnoreModTime, setCompareIgnoreModTime] = useState(true);
   const [compareSelection, setCompareSelection] = useState<Record<string, boolean>>({});
   const [compareMessage, setCompareMessage] = useState("");
 
@@ -1724,6 +1732,7 @@ function App() {
   const [bidiffError, setBiDiffError] = useState("");
   const [bidiffView, setBiDiffView] = useState("different");
   const [bidiffPrefix, setBiDiffPrefix] = useState("");
+  const [bidiffIgnoreModTime, setBiDiffIgnoreModTime] = useState(true);
   const [bidiffSelection, setBiDiffSelection] = useState<Record<string, boolean>>({});
   const [bidiffMessage, setBiDiffMessage] = useState("");
   const [bidiffTasks, setBiDiffTasks] = useState<Record<string, BiDiffTask>>({});
@@ -1735,6 +1744,7 @@ function App() {
   const [peerDiffError, setPeerDiffError] = useState("");
   const [peerDiffView, setPeerDiffView] = useState("different");
   const [peerDiffPrefix, setPeerDiffPrefix] = useState("");
+  const [peerDiffIgnoreModTime, setPeerDiffIgnoreModTime] = useState(true);
   const [peerDiffSelection, setPeerDiffSelection] = useState<Record<string, boolean>>({});
   const [peerDiffMessage, setPeerDiffMessage] = useState("");
   const [peerDiffTasks, setPeerDiffTasks] = useState<Record<string, BiDiffTask>>({});
@@ -1770,6 +1780,8 @@ function App() {
   const [options, setOptions] = useState<OptionsConfig | null>(null);
   const [optionsDraft, setOptionsDraft] = useState<OptionsConfig | null>(null);
   const [pendingFolders, setPendingFolders] = useState<PendingFoldersResponse>({});
+  const [discoveryCache, setDiscoveryCache] = useState<DiscoveryCacheResponse>({});
+  const [pendingDevicesList, setPendingDevicesList] = useState<PendingDevicesResponse>({});
   const [optionsSaveBusy, setOptionsSaveBusy] = useState(false);
   const [optionsSaveMessage, setOptionsSaveMessage] = useState("");
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
@@ -1780,6 +1792,16 @@ function App() {
   const [titleBarStats, setTitleBarStats] = useState<{ total: number; selected: number; leftToRight: number; rightToLeft: number; pending?: number; previewReady?: boolean } | null>(null);
   const [systemActionBusy, setSystemActionBusy] = useState<"" | "restart" | "shutdown">("");
   const [systemActionMessage, setSystemActionMessage] = useState("");
+
+  const [guiDraft, setGuiDraft] = useState<GuiConfig | null>(null);
+  const [guiSaveBusy, setGuiSaveBusy] = useState(false);
+  const [guiSaveMessage, setGuiSaveMessage] = useState("");
+  const [themes, setThemes] = useState<string[]>([]);
+  const [advancedModalOpen, setAdvancedModalOpen] = useState(false);
+  const [advancedConfig, setAdvancedConfig] = useState<Record<string, unknown> | null>(null);
+  const [advancedSaveBusy, setAdvancedSaveBusy] = useState(false);
+  const [advancedSaveMessage, setAdvancedSaveMessage] = useState("");
+  const [settingsTab, setSettingsTab] = useState<"general" | "gui" | "connections" | "ignored-devices" | "ignored-folders">("general");
 
   const folders = config?.folders ?? [];
   const devicesById = useMemo(() => {
@@ -1977,6 +1999,18 @@ function App() {
       setOptions(nextOptions);
       setOptionsDraft((previous) => previous ?? cloneJSON(nextOptions));
 
+      setGuiDraft((previous) => previous ?? cloneJSON(nextConfig.gui));
+
+      try {
+        const themesResp = await fetch("/themes.json");
+        if (themesResp.ok) {
+          const themesData = await themesResp.json();
+          setThemes((themesData?.themes ?? []).sort());
+        }
+      } catch {
+        // themes endpoint may not be available
+      }
+
       if (!selectedFolderId && nextConfig.folders.length > 0) {
         setSelectedFolderId(nextConfig.folders[0].id);
       }
@@ -2006,7 +2040,7 @@ function App() {
     try {
       const requestView = compareRequestView(compareView);
       const data = await getJSON<CompareResult>(
-        `/rest/db/compare?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(comparePrefix)}&page=1&perpage=500`,
+        `/rest/db/compare?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(comparePrefix)}&page=1&perpage=5000${compareIgnoreModTime ? "&ignoreModTime=true" : ""}`,
       );
       setCompare(data);
       setCompareSelection((previous) => {
@@ -2023,7 +2057,7 @@ function App() {
     } finally {
       setCompareBusy(false);
     }
-  }, [comparePrefix, compareView, selectedDeviceId, selectedFolder]);
+  }, [comparePrefix, compareView, compareIgnoreModTime, selectedDeviceId, selectedFolder]);
 
   const refreshCompare = useCallback(async (rescanLocal: boolean) => {
     if (!selectedFolder) {
@@ -2052,7 +2086,7 @@ function App() {
     }
     if (isPausedFolder(selectedFolder)) {
       setBiDiff(null);
-      setBiDiffError("当前文件夹已暂停，请先恢复后再进行双向裁决。");
+      setBiDiffError("当前文件夹已暂停，请先恢复后再进行双向接发。");
       return;
     }
 
@@ -2061,7 +2095,7 @@ function App() {
     try {
       const requestView = bidiffRequestView(bidiffView);
       const data = await getJSON<BiDiffResult>(
-        `/rest/db/bidiff?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(bidiffPrefix)}&page=1&perpage=500`,
+        `/rest/db/bidiff?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(bidiffPrefix)}&page=1&perpage=5000${bidiffIgnoreModTime ? "&ignoreModTime=true" : ""}`,
       );
       setBiDiff(data);
       setBiDiffSelection((previous) => {
@@ -2074,11 +2108,11 @@ function App() {
         return next;
       });
     } catch (error) {
-      setBiDiffError(error instanceof Error ? error.message : "加载双向差异裁决失败");
+      setBiDiffError(error instanceof Error ? error.message : "加载双向接发失败");
     } finally {
       setBiDiffBusy(false);
     }
-  }, [bidiffPrefix, bidiffView, selectedDeviceId, selectedFolder]);
+  }, [bidiffPrefix, bidiffView, bidiffIgnoreModTime, selectedDeviceId, selectedFolder]);
 
   const refreshBiDiff = useCallback(async (rescanLocal: boolean) => {
     if (!selectedFolder) {
@@ -2086,7 +2120,7 @@ function App() {
     }
     if (isPausedFolder(selectedFolder)) {
       setBiDiff(null);
-      setBiDiffError("当前文件夹已暂停，请先恢复后再进行双向裁决。");
+      setBiDiffError("当前文件夹已暂停，请先恢复后再进行双向接发。");
       return;
     }
     if (rescanLocal) {
@@ -2107,7 +2141,7 @@ function App() {
     }
     if (isPausedFolder(selectedFolder)) {
       setPeerDiff(null);
-      setPeerDiffError("当前文件夹已暂停，请先恢复后再查看对等差异。");
+      setPeerDiffError("当前文件夹已暂停，请先恢复后再查看直传差异。");
       return;
     }
 
@@ -2116,7 +2150,7 @@ function App() {
     try {
       const requestView = bidiffRequestView(peerDiffView);
       const data = await getJSON<BiDiffResult>(
-        `/rest/db/peerdiff?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(peerDiffPrefix)}&page=1&perpage=500`,
+        `/rest/db/peerdiff?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(peerDiffPrefix)}&page=1&perpage=5000${peerDiffIgnoreModTime ? "&ignoreModTime=true" : ""}`,
       );
       setPeerDiff(data);
       setPeerDiffSelection((previous) => {
@@ -2129,11 +2163,11 @@ function App() {
         return next;
       });
     } catch (error) {
-      setPeerDiffError(error instanceof Error ? error.message : "加载对等差异工作台失败");
+      setPeerDiffError(error instanceof Error ? error.message : "加载直传工作台失败");
     } finally {
       setPeerDiffBusy(false);
     }
-  }, [peerDiffPrefix, peerDiffView, selectedDeviceId, selectedFolder]);
+  }, [peerDiffPrefix, peerDiffView, peerDiffIgnoreModTime, selectedDeviceId, selectedFolder]);
 
   const refreshPeerDiff = useCallback(async (rescanLocal: boolean) => {
     if (!selectedFolder) {
@@ -2141,7 +2175,7 @@ function App() {
     }
     if (isPausedFolder(selectedFolder)) {
       setPeerDiff(null);
-      setPeerDiffError("当前文件夹已暂停，请先恢复后再查看对等差异。");
+      setPeerDiffError("当前文件夹已暂停，请先恢复后再查看直传差异。");
       return;
     }
     if (rescanLocal) {
@@ -2170,7 +2204,7 @@ function App() {
     setPublishError("");
     try {
       const data = await getJSON<PendingPublishResult>(
-        `/rest/db/pendingpublish?folder=${encodeURIComponent(selectedFolder.id)}&view=${encodeURIComponent(publishView)}&prefix=${encodeURIComponent(publishPrefix)}&page=1&perpage=500`,
+        `/rest/db/pendingpublish?folder=${encodeURIComponent(selectedFolder.id)}&view=${encodeURIComponent(publishView)}&prefix=${encodeURIComponent(publishPrefix)}&page=1&perpage=5000`,
       );
       setPublish(data);
       setPublishSelection((previous) => {
@@ -2300,7 +2334,7 @@ function App() {
         // ignore polling errors
       }
     };
-    const handle = window.setInterval(poll, 2000);
+    const handle = window.setInterval(poll, 1000);
     poll();
     return () => { cancelled = true; window.clearInterval(handle); };
   }, [authenticated]);
@@ -2356,26 +2390,55 @@ function App() {
     if (entries.length === 0) return;
     let cancelled = false;
     (async () => {
-      const newInfo: Record<string, { totalBlocks: number; size: number }> = {};
-      for (const { folder, file, key } of entries) {
-        if (cancelled) return;
-        try {
+      const results = await Promise.allSettled(
+        entries.map(async ({ folder, file, key }) => {
           const info = await getJSON<{ global?: { size: number; numBlocks?: number }; local?: { size: number; numBlocks?: number } }>(`/rest/db/file?folder=${encodeURIComponent(folder)}&file=${encodeURIComponent(file)}`);
-          if (cancelled) return;
           const fi = info?.global ?? info?.local;
           if (fi && typeof fi.size === "number") {
-            newInfo[key] = { totalBlocks: fi.numBlocks ?? 0, size: fi.size };
+            return { key, totalBlocks: fi.numBlocks ?? 0, size: fi.size };
           }
-        } catch {
-          // ignore
+          return null;
+        })
+      );
+      if (cancelled) return;
+      const newInfo: Record<string, { totalBlocks: number; size: number }> = {};
+      for (const r of results) {
+        if (r.status === "fulfilled" && r.value) {
+          newInfo[r.value.key] = { totalBlocks: r.value.totalBlocks, size: r.value.size };
         }
       }
-      if (!cancelled && Object.keys(newInfo).length > 0) {
+      if (Object.keys(newInfo).length > 0) {
         setUploadFileInfo((prev) => ({ ...prev, ...newInfo }));
       }
     })();
     return () => { cancelled = true; };
   }, [authenticated, uploadProgress]);
+
+  // Periodically retry file info for uploads still showing "?"
+  useEffect(() => {
+    if (!authenticated) return;
+    const interval = window.setInterval(() => {
+      const current = uploadProgressRef.current;
+      const fileInfo = uploadFileInfoRef.current;
+      const missingKeys: string[] = [];
+      for (const files of Object.values(current)) {
+        for (const key of Object.keys(files)) {
+          if (!fileInfo[key]) missingKeys.push(key);
+        }
+      }
+      if (missingKeys.length > 0) {
+        // Clear missing entries so the fetch useEffect re-triggers
+        setUploadFileInfo((prev) => {
+          const next = { ...prev };
+          for (const k of missingKeys) delete next[k];
+          return next;
+        });
+        // Force uploadProgress reference change to trigger the fetch effect
+        setUploadProgress((prev) => ({ ...prev }));
+      }
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [authenticated]);
 
   useEffect(() => {
     if (!config || selectedFolderId) {
@@ -2715,7 +2778,7 @@ function App() {
     }
     const directionLabel = direction === "left-to-right" ? "采用左侧到右侧" : "采用右侧到左侧";
     const summary = entries.length === 1 ? `\n\n${entries[0].path}` : `\n\n共 ${entries.length} 项`;
-    if (!window.confirm(`确认执行“${directionLabel}”？${summary}`)) {
+    if (!window.confirm(`确认执行"${directionLabel}"？${summary}`)) {
       return;
     }
     const now = Date.now();
@@ -2744,11 +2807,11 @@ function App() {
           files: entries.map((entry) => entry.path),
         },
       );
-      setBiDiffMessage(direction === "left-to-right" ? "已提交左侧到右侧的裁决动作。" : "已提交右侧到左侧的裁决动作。");
+      setBiDiffMessage(direction === "left-to-right" ? "已提交左侧到右侧的接发动作。" : "已提交右侧到左侧的接发动作。");
       setBiDiffSelection({});
       await Promise.all([refreshBiDiff(true), loadBootstrap(), refreshCompare(true), refreshPublish(true)]);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "双向裁决提交失败";
+      const message = error instanceof Error ? error.message : "双向接发提交失败";
       setBiDiffTasks((previous) => {
         const next = { ...previous };
         for (const entry of entries) {
@@ -2775,7 +2838,7 @@ function App() {
     }
     const directionLabel = direction === "left-to-right" ? "采用左侧到右侧" : "采用右侧到左侧";
     const summary = entries.length === 1 ? `\n\n${entries[0].path}` : `\n\n共 ${entries.length} 项`;
-    if (!window.confirm(`确认执行“${directionLabel}”？${summary}`)) {
+    if (!window.confirm(`确认执行"${directionLabel}"？${summary}`)) {
       return;
     }
     const now = Date.now();
@@ -2804,11 +2867,11 @@ function App() {
           files: entries.map((entry) => entry.path),
         },
       );
-      setPeerDiffMessage(direction === "left-to-right" ? "已提交左侧到右侧的对等裁决动作。" : "已提交右侧到左侧的对等裁决动作。");
+      setPeerDiffMessage(direction === "left-to-right" ? "已提交左侧到右侧的直传动作。" : "已提交右侧到左侧的直传动作。");
       setPeerDiffSelection({});
       await Promise.all([refreshPeerDiff(true), loadBootstrap(), refreshCompare(true), refreshPublish(true)]);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "对等差异裁决提交失败";
+      const message = error instanceof Error ? error.message : "直传提交失败";
       setPeerDiffTasks((previous) => {
         const next = { ...previous };
         for (const entry of entries) {
@@ -2924,7 +2987,7 @@ function App() {
     next.paused = !folder.paused;
     try {
       await putJSON(`/rest/config/folders/${encodeURIComponent(folder.id)}`, buildFolderPayload(next));
-      setOverviewMessage(next.paused ? `已暂停文件夹“${folderLabel(folder)}”。` : `已恢复文件夹“${folderLabel(folder)}”。`);
+      setOverviewMessage(next.paused ? `已暂停文件夹"${folderLabel(folder)}"。` : `已恢复文件夹"${folderLabel(folder)}"。`);
       await loadBootstrap();
     } catch (error) {
       setOverviewMessage(error instanceof Error ? error.message : "切换文件夹暂停状态失败");
@@ -2954,7 +3017,7 @@ function App() {
   };
 
   const deleteCurrentFolder = async () => {
-    if (!selectedFolder || !window.confirm(`确认删除文件夹“${folderLabel(selectedFolder)}”的配置吗？`)) {
+    if (!selectedFolder || !window.confirm(`确认删除文件夹"${folderLabel(selectedFolder)}"的配置吗？`)) {
       return;
     }
     setFolderSaveBusy(true);
@@ -2993,7 +3056,7 @@ function App() {
   };
 
   const deleteCurrentDevice = async () => {
-    if (!editingDevice || !window.confirm(`确认删除设备“${deviceName(editingDevice)}”的配置吗？`)) {
+    if (!editingDevice || !window.confirm(`确认删除设备"${deviceName(editingDevice)}"的配置吗？`)) {
       return;
     }
     setDeviceSaveBusy(true);
@@ -3039,7 +3102,11 @@ function App() {
     setNewDeviceBusy(true);
     setOptionsSaveMessage("");
     try {
-      const defaults = await getJSON<DeviceConfig>("/rest/config/defaults/device");
+      const [defaults, discovery, pending] = await Promise.all([
+        getJSON<DeviceConfig>("/rest/config/defaults/device"),
+        getJSON<DiscoveryCacheResponse>("/rest/system/discovery").catch(() => ({})),
+        getJSON<PendingDevicesResponse>("/rest/cluster/pending/devices").catch(() => ({})),
+      ]);
       const nextDevice: DeviceConfig = {
         ...cloneJSON(defaults),
         deviceID: "",
@@ -3049,6 +3116,8 @@ function App() {
       setDeviceEditorId("__new__");
       setDeviceDraft(nextDevice);
       setDeviceShareDraft({ selected: {}, encryptionPasswords: {} });
+      setDiscoveryCache(discovery);
+      setPendingDevicesList(pending);
       setSettingsModalOpen(false);
     } catch (error) {
       setOptionsSaveMessage(error instanceof Error ? error.message : "打开新设备表单失败");
@@ -3164,11 +3233,91 @@ function App() {
     }
   };
 
+  const saveGuiDraft = async () => {
+    if (!guiDraft) return;
+    setGuiSaveBusy(true);
+    setGuiSaveMessage("");
+    try {
+      await putJSON("/rest/config/gui", guiDraft);
+      setGuiSaveMessage("GUI 设置已保存。");
+      await loadBootstrap();
+    } catch (error) {
+      setGuiSaveMessage(error instanceof Error ? error.message : "保存 GUI 设置失败");
+    } finally {
+      setGuiSaveBusy(false);
+    }
+  };
+
+  const saveAdvancedConfig = async () => {
+    if (!advancedConfig) return;
+    setAdvancedSaveBusy(true);
+    setAdvancedSaveMessage("");
+    try {
+      await putJSON("/rest/config", advancedConfig);
+      setAdvancedSaveMessage("高级配置已保存。");
+      setAdvancedModalOpen(false);
+      await loadBootstrap();
+    } catch (error) {
+      setAdvancedSaveMessage(error instanceof Error ? error.message : "保存高级配置失败");
+    } finally {
+      setAdvancedSaveBusy(false);
+    }
+  };
+
+  const loadAdvancedConfig = async () => {
+    try {
+      const fullConfig = await getJSON<Record<string, unknown>>("/rest/config");
+      setAdvancedConfig(fullConfig);
+      setAdvancedSaveMessage("");
+      setAdvancedModalOpen(true);
+    } catch (error) {
+      setOptionsSaveMessage(error instanceof Error ? error.message : "加载高级配置失败");
+    }
+  };
+
+  const unignoreDevice = async (deviceID: string) => {
+    try {
+      await deleteJSON(`/rest/config/remoteIgnoredDevices/${encodeURIComponent(deviceID)}`);
+      await loadBootstrap();
+    } catch (error) {
+      setOptionsSaveMessage(error instanceof Error ? error.message : "取消忽略设备失败");
+    }
+  };
+
+  const unignoreFolder = async (deviceID: string, folderID: string) => {
+    try {
+      const device = allDevices.find((d) => d.deviceID === deviceID);
+      if (!device) return;
+      const updated = {
+        ...device,
+        ignoredFolders: (device.ignoredFolders ?? []).filter((f) => f.id !== folderID),
+      };
+      await putJSON(`/rest/config/devices/${encodeURIComponent(deviceID)}`, updated);
+      await loadBootstrap();
+    } catch (error) {
+      setOptionsSaveMessage(error instanceof Error ? error.message : "取消忽略文件夹失败");
+    }
+  };
+
+  const saveProgressInterval = async (value: number) => {
+    if (!optionsDraft) return;
+    const updated = { ...optionsDraft, progressUpdateIntervalS: value };
+    setOptionsDraft(updated);
+    try {
+      const payload = cloneJSON(updated);
+      payload.alwaysLocalNets = (payload.alwaysLocalNets ?? []).filter((v) => v.trim().length > 0);
+      await putJSON("/rest/config/options", payload);
+      setOptions(payload);
+    } catch {
+      // ignore
+    }
+  };
+
   const rescanFolder = async (folder: FolderConfig) => {
-    setOverviewMessage(`正在请求重新扫描“${folderLabel(folder)}”...`);
+    setOverviewMessage(`正在请求重新扫描"${folderLabel(folder)}"...`);
     try {
       await postJSON(`/rest/db/scan?folder=${encodeURIComponent(folder.id)}`);
-      setOverviewMessage(`已提交“${folderLabel(folder)}”的重新扫描请求。`);
+      setOverviewMessage(`已提交"${folderLabel(folder)}"的重新扫描请求。`);
       await loadBootstrap();
     } catch (error) {
       setOverviewMessage(error instanceof Error ? error.message : "提交重新扫描失败");
@@ -3549,7 +3698,7 @@ function App() {
         ) : bootError && !config ? (
           <section className="panel surface">
             <h3>工作台加载失败</h3>
-            <p>当前不是“没有文件夹”，而是前端还没拿到配置或状态数据。你可以先点刷新再试一次。</p>
+            <p>当前不是"没有文件夹"，而是前端还没拿到配置或状态数据。你可以先点刷新再试一次。</p>
             <div className="inline-message danger">{bootError}</div>
             <div className="panel-actions">
               <button className="ghost-button" onClick={() => void loadBootstrap()} disabled={bootBusy}>
@@ -3573,7 +3722,7 @@ function App() {
                   </div>
                 </div>
                 <div className="help-block">
-                  如果你希望某台远端设备以后共享的新文件夹自动落到当前设备，可在“编辑设备 &gt; 共享”中开启“自动接受”。
+                  如果你希望某台远端设备以后共享的新文件夹自动落到当前设备，可在"编辑设备 &gt; 共享"中开启"自动接受"。
                 </div>
                 <div className="share-list">
                   {Object.entries(pendingFolders).map(([folderId, pending]) => {
@@ -3736,6 +3885,9 @@ function App() {
             message={deviceSaveMessage}
             isNew={editingNewDevice}
             onDelete={editingExistingDevice ? () => void deleteCurrentDevice() : undefined}
+            discoveryCache={discoveryCache}
+            pendingDevices={pendingDevicesList}
+            existingDeviceIds={new Set(config?.devices?.map((d) => d.deviceID) ?? [])}
           />
         </ModalShell>
       )}
@@ -3758,6 +3910,8 @@ function App() {
             compareSelection={compareSelection}
             onCompareSelectionChange={setCompareSelection}
             compareMessage={compareMessage}
+            compareIgnoreModTime={compareIgnoreModTime}
+            onCompareIgnoreModTimeChange={setCompareIgnoreModTime}
             onRefresh={() => void refreshCompare(true)}
             onSyncSelected={() =>
               void syncEntries((compare?.entries ?? []).filter((entry) => compareSelection[entry.path] && entry.canPrioritize))
@@ -3772,7 +3926,7 @@ function App() {
         <ModalShell
           title={
             <WorkbenchTitle
-              label={`裁决 · ${folderLabel(selectedFolder)}`}
+              label={`接发 · ${folderLabel(selectedFolder)}`}
               device={selectedDevice}
               connection={selectedDeviceId ? connections?.connections[selectedDeviceId] : undefined}
               rates={selectedDeviceId ? connectionRates[selectedDeviceId] : undefined}
@@ -3814,6 +3968,8 @@ function App() {
             bidiffSelection={bidiffSelection}
             onBidiffSelectionChange={setBiDiffSelection}
             bidiffMessage={bidiffMessage}
+            bidiffIgnoreModTime={bidiffIgnoreModTime}
+            onBidiffIgnoreModTimeChange={setBiDiffIgnoreModTime}
             onRefresh={() => void refreshBiDiff(true)}
             onApplyLeftToRight={() =>
               void applyBiDiffEntries(
@@ -3843,6 +3999,8 @@ function App() {
             connectionRates={selectedDeviceId ? connectionRates[selectedDeviceId] : undefined}
             workbenchView={bidiffWorkbenchView}
             onWorkbenchViewChange={setBidiffWorkbenchView}
+            progressUpdateIntervalS={options?.progressUpdateIntervalS}
+            onSaveProgressInterval={saveProgressInterval}
           />
         </ModalShell>
       )}
@@ -3851,7 +4009,7 @@ function App() {
         <ModalShell
           title={
             <WorkbenchTitle
-              label={`对等 · ${folderLabel(selectedFolder)}`}
+              label={`直传 · ${folderLabel(selectedFolder)}`}
               device={selectedDevice}
               connection={selectedDeviceId ? connections?.connections[selectedDeviceId] : undefined}
               rates={selectedDeviceId ? connectionRates[selectedDeviceId] : undefined}
@@ -3894,6 +4052,8 @@ function App() {
             bidiffSelection={peerDiffSelection}
             onBidiffSelectionChange={setPeerDiffSelection}
             bidiffMessage={peerDiffMessage}
+            bidiffIgnoreModTime={peerDiffIgnoreModTime}
+            onBidiffIgnoreModTimeChange={setPeerDiffIgnoreModTime}
             onRefresh={() => void refreshPeerDiff(true)}
             onApplyLeftToRight={() =>
               void applyPeerDiffEntries(
@@ -3923,6 +4083,8 @@ function App() {
             connectionRates={selectedDeviceId ? connectionRates[selectedDeviceId] : undefined}
             workbenchView={peerWorkbenchView}
             onWorkbenchViewChange={setPeerWorkbenchView}
+            progressUpdateIntervalS={options?.progressUpdateIntervalS}
+            onSaveProgressInterval={saveProgressInterval}
           />
         </ModalShell>
       )}
@@ -3993,18 +4155,73 @@ function OverviewPanel(props: {
   onTogglePaused: (folder: FolderConfig) => void;
 }) {
   const [ovColumns, setOvColumns] = useState([
-    { key: "name", label: "文件夹", width: 140, minWidth: 80 },
-    { key: "type", label: "类型", width: 70, minWidth: 50 },
-    { key: "status", label: "状态", width: 60, minWidth: 50 },
+    { key: "name", label: "文件夹", width: 160, minWidth: 80 },
+    { key: "type", label: "类型", width: 80, minWidth: 50 },
+    { key: "status", label: "状态", width: 70, minWidth: 50 },
     { key: "receive", label: "接收", width: 70, minWidth: 50 },
     { key: "publish", label: "发布", width: 70, minWidth: 50 },
     { key: "local", label: "本地", width: 100, minWidth: 70 },
     { key: "global", label: "全局", width: 100, minWidth: 70 },
-    { key: "need", label: "待同步", width: 55, minWidth: 40 },
-    { key: "error", label: "错误", width: 45, minWidth: 35 },
-    { key: "devices", label: "远端设备", width: 90, minWidth: 60 },
-    { key: "actions", label: "操作", width: 286, minWidth: 240 },
+    { key: "need", label: "待同步", width: 60, minWidth: 40 },
+    { key: "error", label: "错误", width: 50, minWidth: 35 },
+    { key: "devices", label: "远端设备", width: 100, minWidth: 60 },
+    { key: "actions", label: "操作", width: 340, minWidth: 260 },
   ]);
+
+  const overviewTableRef = useRef<HTMLDivElement>(null);
+
+  // Auto-fit column widths to content. Only grows columns when content
+  // is actually overflowing (scrollWidth > clientWidth), and only by the
+  // amount needed to eliminate overflow. Never shrinks below minWidth.
+  useLayoutEffect(() => {
+    const wrapper = overviewTableRef.current;
+    if (!wrapper) return;
+
+    const measured: Record<string, number> = {};
+    // Measure cells — only when content is actually overflowing
+    const cells = wrapper.querySelectorAll<HTMLElement>('[data-col-key]');
+    cells.forEach((cell) => {
+      const key = cell.dataset.colKey;
+      if (!key) return;
+      // Only act when content overflows the current column width.
+      // scrollWidth > clientWidth means the natural content is wider
+      // than the visible area, so the column needs to grow.
+      if (cell.scrollWidth > cell.clientWidth + 1) {
+        measured[key] = Math.max(measured[key] ?? 0, cell.scrollWidth);
+      }
+    });
+
+    // Also measure header labels for overflow
+    const headerCells = wrapper.querySelectorAll<HTMLElement>('.overview-table-header-cell');
+    headerCells.forEach((cell) => {
+      const label = cell.firstChild?.textContent?.trim();
+      if (!label) return;
+      const col = ovColumns.find((c) => c.label === label);
+      if (!col) return;
+      const handle = cell.querySelector<HTMLElement>('.ov-resize-handle');
+      const handleW = handle?.offsetWidth ?? 0;
+      // Only grow if header text is overflowing
+      if (cell.scrollWidth > cell.clientWidth + 1) {
+        const textW = cell.scrollWidth - handleW;
+        measured[col.key] = Math.max(measured[col.key] ?? 0, textW);
+      }
+    });
+
+    setOvColumns((prev) => {
+      let changed = false;
+      const next = prev.map((col) => {
+        const m = measured[col.key];
+        if (m !== undefined && m > col.width) {
+          changed = true;
+          return { ...col, width: Math.max(m, col.minWidth) };
+        }
+        return col;
+      });
+      // Only update if something actually grew
+      return changed ? next : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.folders, props.folderStatuses]);
 
   const handleOvResize = (colIndex: number, clientX: number) => {
     beginColumnResize(clientX, colIndex, ovColumns, setOvColumns);
@@ -4022,10 +4239,10 @@ function OverviewPanel(props: {
       </div>
       {props.overviewMessage && <div className="inline-message info">{props.overviewMessage}</div>}
 
-      <div className="overview-table-wrapper">
+      <div className="overview-table-wrapper" ref={overviewTableRef}>
         <div className="overview-table" style={{ gridTemplateColumns: gridTemplate }}>
           {ovColumns.map((col) => (
-            <div key={col.key} className="overview-table-header-cell">
+            <div key={col.key} className="overview-table-header-cell" data-col-key={col.key}>
               {col.label}
               <div
                 className="ov-resize-handle"
@@ -4057,40 +4274,40 @@ function OverviewPanel(props: {
                 className={`overview-table-row${active ? " active" : ""}`}
                 style={{ gridTemplateColumns: gridTemplate }}
               >
-                <div className="ov-cell ov-cell-name">
+                <div className="ov-cell ov-cell-name" data-col-key="name">
                   <button className="ov-name-button" onClick={() => props.onSelectFolder(folder.id)}>
                     {folderLabel(folder)}
                   </button>
                 </div>
-                <div className="ov-cell">
+                <div className="ov-cell" data-col-key="type">
                   <span className="badge badge-sm tone-info">{folderTypeLabel(folder.type)}</span>
                 </div>
-                <div className="ov-cell">
+                <div className="ov-cell" data-col-key="status">
                   <span className={`badge badge-sm tone-${folderStateTone(status)}`}>{status?.state ?? "未知"}</span>
                 </div>
-                <div className="ov-cell">
+                <div className="ov-cell" data-col-key="receive">
                   <span className={`badge badge-sm ${folder.manualSync ? "tone-warning" : "tone-success"}`}>
                     {folder.manualSync ? "手动" : "自动"}
                   </span>
                 </div>
-                <div className="ov-cell">
+                <div className="ov-cell" data-col-key="publish">
                   <span className={`badge badge-sm ${folder.manualPublish ? "tone-warning" : "tone-success"}`}>
                     {folder.manualPublish ? "手动" : "自动"}
                   </span>
                 </div>
-                <div className="ov-cell ov-cell-num">
+                <div className="ov-cell ov-cell-num" data-col-key="local">
                   {status?.localFiles ?? 0} / {formatBinary(status?.localBytes)}
                 </div>
-                <div className="ov-cell ov-cell-num">
+                <div className="ov-cell ov-cell-num" data-col-key="global">
                   {status?.globalFiles ?? 0} / {formatBinary(status?.globalBytes)}
                 </div>
-                <div className={`ov-cell ov-cell-num${(status?.needTotalItems ?? 0) > 0 ? " has-need" : ""}`}>
+                <div className={`ov-cell ov-cell-num${(status?.needTotalItems ?? 0) > 0 ? " has-need" : ""}`} data-col-key="need">
                   {status?.needTotalItems ?? 0}
                 </div>
-                <div className={`ov-cell ov-cell-num${(status?.errors ?? 0) > 0 ? " has-error" : ""}`}>
+                <div className={`ov-cell ov-cell-num${(status?.errors ?? 0) > 0 ? " has-error" : ""}`} data-col-key="error">
                   {status?.errors ?? 0}
                 </div>
-                <div className="ov-cell ov-cell-devices">
+                <div className="ov-cell ov-cell-devices" data-col-key="devices">
                   {devices.length === 0 ? (
                     <span className="muted">无</span>
                   ) : (
@@ -4099,7 +4316,7 @@ function OverviewPanel(props: {
                     </span>
                   )}
                 </div>
-                <div className="ov-cell ov-cell-actions">
+                <div className="ov-cell ov-cell-actions" data-col-key="actions">
                   <button className="mini-button" onClick={() => props.onRescan(folder)} disabled={paused} title={paused ? "暂停中的文件夹不可刷新" : "刷新状态"}>↻</button>
                   <button className="mini-button" onClick={() => props.onEditFolder(folder)} title="编辑设置">✎</button>
                   <button
@@ -4109,11 +4326,11 @@ function OverviewPanel(props: {
                   >
                     {folder.paused ? "恢复" : "暂停"}
                   </button>
-                  <button className="mini-button secondary" onClick={() => props.onOpenBiDiff(folder)} disabled={paused} title={paused ? "请先恢复文件夹" : "双向裁决"}>
-                    裁决
+                  <button className="mini-button secondary" onClick={() => props.onOpenBiDiff(folder)} disabled={paused} title={paused ? "请先恢复文件夹" : "双向接发"}>
+                    接发
                   </button>
-                  <button className="mini-button secondary" onClick={() => props.onOpenPeerDiff(folder)} disabled={paused} title={paused ? "请先恢复文件夹" : "对等差异工作台"}>
-                    对等
+                  <button className="mini-button secondary" onClick={() => props.onOpenPeerDiff(folder)} disabled={paused} title={paused ? "请先恢复文件夹" : "直传工作台"}>
+                    直传
                   </button>
                   <button
                     className="mini-button primary"
@@ -4221,6 +4438,180 @@ function OverviewPanel(props: {
   );
 }
 
+type FileBlocksResponse = {
+  local?: { size: number; Blocks?: { Hash?: string | number[]; Offset?: number; Size?: number }[] };
+  global?: { size: number; Blocks?: { Hash?: string | number[]; Offset?: number; Size?: number }[] };
+};
+
+function FileDetailCompare({ entry, folder, onClose }: { entry: CompareEntry; folder: string; onClose: () => void }) {
+  const [showBlocks, setShowBlocks] = useState(false);
+  const [blockData, setBlockData] = useState<FileBlocksResponse | null>(null);
+  const [blocksLoading, setBlocksLoading] = useState(false);
+  const [blocksError, setBlocksError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setBlocksLoading(true);
+    setBlocksError("");
+    getJSON<FileBlocksResponse>(`/rest/db/file?folder=${encodeURIComponent(folder)}&file=${encodeURIComponent(entry.path)}`)
+      .then((data) => { if (!cancelled) setBlockData(data); })
+      .catch((err: unknown) => { if (!cancelled) { setBlockData(null); setBlocksError(err instanceof Error ? err.message : String(err)); } })
+      .finally(() => { if (!cancelled) setBlocksLoading(false); });
+    return () => { cancelled = true; };
+  }, [folder, entry.path]);
+
+  function formatTime(modified: string | undefined): string {
+    if (!modified) return "—";
+    try { return new Date(modified).toLocaleString("zh-CN"); } catch { return modified; }
+  }
+
+  function formatBytes(val: number | string | undefined): string {
+    if (val === undefined || val === null) return "—";
+    const n = typeof val === "string" ? parseInt(val, 10) : val;
+    if (isNaN(n)) return "—";
+    if (n < 1024) return `${n} B`;
+    if (n < 1048576) return `${(n / 1024).toFixed(1)} KiB`;
+    if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MiB`;
+    return `${(n / 1073741824).toFixed(2)} GiB`;
+  }
+
+  function hashToHex(h: string | number[] | null | undefined): string {
+    if (!h) return "—";
+    if (typeof h === "string") {
+      try {
+        const raw = atob(h);
+        let hex = "";
+        for (let i = 0; i < raw.length; i++) hex += raw.charCodeAt(i).toString(16).padStart(2, "0");
+        return hex;
+      } catch { return h; }
+    }
+    if (Array.isArray(h)) return h.map((b) => b.toString(16).padStart(2, "0")).join("");
+    return "—";
+  }
+
+  function blocksEqual(a: JsonFileInfo | undefined, b: JsonFileInfo | undefined): boolean {
+    const ha = hashToHex(a?.blocksHash ?? null);
+    const hb = hashToHex(b?.blocksHash ?? null);
+    return ha !== "—" && hb !== "—" && ha === hb;
+  }
+
+  function fileField(label: string, localVal: string, remoteVal: string, eq: boolean) {
+    return (
+      <tr>
+        <td style={{ fontWeight: 600, whiteSpace: "nowrap", paddingRight: 16 }}>{label}</td>
+        <td className={eq ? "" : "tone-warning"}>{localVal}</td>
+        <td className={eq ? "" : "tone-warning"}>{remoteVal}</td>
+      </tr>
+    );
+  }
+
+  const local = entry.local;
+  const remote = entry.remote;
+  const sizeEq = local && remote ? local.size === remote.size : false;
+  const mtimeEq = local && remote ? local.modified === remote.modified : false;
+  const blockHashEq = blocksEqual(local, remote);
+
+  const localBlocks = blockData?.local?.Blocks ?? [];
+  const remoteBlocks = blockData?.global?.Blocks ?? [];
+  const hasBlockData = localBlocks.length > 0 || remoteBlocks.length > 0;
+  const maxBlocks = Math.max(localBlocks.length, remoteBlocks.length);
+
+  return (
+    <div className="panel panel-default" style={{ marginBottom: 12 }}>
+      <div className="panel-heading" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <strong>📋 文件详细对比：{entry.path}</strong>
+        <button className="ghost-button compact-button" onClick={onClose}>✕ 关闭</button>
+      </div>
+      <div className="panel-body" style={{ maxHeight: 480, overflow: "auto" }}>
+        <table className="table table-condensed table-bordered" style={{ marginBottom: 0 }}>
+          <thead>
+            <tr>
+              <th style={{ width: "25%" }}>字段</th>
+              <th style={{ width: "37.5%" }}>本地</th>
+              <th style={{ width: "37.5%" }}>远端</th>
+            </tr>
+          </thead>
+          <tbody>
+            {fileField("类型", local?.type ?? "—", remote?.type ?? "—", local?.type === remote?.type)}
+            {fileField("大小", formatBytes(local?.size), formatBytes(remote?.size), sizeEq)}
+            {fileField("修改时间", formatTime(local?.modified), formatTime(remote?.modified), mtimeEq)}
+            {fileField("已删除", local?.deleted ? "是" : "否", remote?.deleted ? "是" : "否", !local?.deleted === !remote?.deleted)}
+            {fileField("权限", local ? `0o${(local as any).permissions?.toString(8) ?? "—"}` : "—", remote ? `0o${(remote as any).permissions?.toString(8) ?? "—"}` : "—", (local as any)?.permissions === (remote as any)?.permissions)}
+            {fileField("修改者", local?.modifiedBy ?? "—", remote?.modifiedBy ?? "—", local?.modifiedBy === remote?.modifiedBy)}
+            {fileField("本地标记", `0x${(local?.localFlags ?? 0).toString(16)}`, `0x${(remote?.localFlags ?? 0).toString(16)}`, local?.localFlags === remote?.localFlags)}
+            {fileField("BlocksHash", hashToHex(local?.blocksHash ?? null).substring(0, 32) + "...", hashToHex(remote?.blocksHash ?? null).substring(0, 32) + "...", blockHashEq)}
+            {fileField("块列表大小", localBlocks.length > 0 ? `${localBlocks.length} 个块` : "—", remoteBlocks.length > 0 ? `${remoteBlocks.length} 个块` : "—", localBlocks.length === remoteBlocks.length && localBlocks.length > 0)}
+          </tbody>
+        </table>
+
+        <div style={{ marginTop: 12 }}>
+          <button className="ghost-button compact-button" onClick={() => { if (!showBlocks && !blockData) setBlocksLoading(true); setShowBlocks(!showBlocks); }}>
+            {blocksLoading ? "⏳ 加载块数据中..." : showBlocks ? "▾ 隐藏块列表" : "▸ 展开块列表"}
+          </button>
+          {showBlocks && blocksLoading && <span className="text-muted" style={{ marginLeft: 12 }}>正在从服务器获取完整块数据...</span>}
+          {showBlocks && !blocksLoading && hasBlockData && (
+            <table className="table table-condensed table-bordered" style={{ marginTop: 8, marginBottom: 0 }}>
+              <thead>
+                <tr>
+                  <th>块号</th>
+                  <th>本地哈希 (SHA-256)</th>
+                  <th>远端哈希 (SHA-256)</th>
+                  <th>偏移</th>
+                  <th>大小</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Array.from({ length: maxBlocks }, (_, i) => {
+                  const lb = localBlocks[i];
+                  const rb = remoteBlocks[i];
+                  const lh = lb?.Hash ? hashToHex((lb.Hash as any)).substring(0, 16) : "—";
+                  const rh = rb?.Hash ? hashToHex((rb.Hash as any)).substring(0, 16) : "—";
+                  const match = lb && rb && lh !== "—" && rh !== "—" && lh === rh;
+                  return (
+                    <tr key={i} className={match ? "" : "tone-warning"}>
+                      <td>{i}</td>
+                      <td style={{ fontFamily: "monospace", fontSize: "0.75rem" }} title={lb?.Hash ? hashToHex((lb.Hash as any)) : ""}>{lh}...</td>
+                      <td style={{ fontFamily: "monospace", fontSize: "0.75rem" }} title={rb?.Hash ? hashToHex((rb.Hash as any)) : ""}>{rh}...</td>
+                      <td>{lb?.Offset ?? rb?.Offset ?? "—"}</td>
+                      <td>{formatBytes(lb?.Size ?? rb?.Size)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          {showBlocks && !blocksLoading && !hasBlockData && !blocksError && (
+            <div className="text-muted" style={{ marginTop: 8 }}>
+              无法获取块数据：API 返回的 local/global 中均无 Blocks 字段。可能原因：① 该文件的块列表尚未写入数据库；② 该文件是远端文件，本地未存储其块详情。
+            </div>
+          )}
+          {showBlocks && !blocksLoading && blocksError && (
+            <div className="inline-message danger" style={{ marginTop: 8 }}>
+              API 请求失败：{blocksError}
+            </div>
+          )}
+          {showBlocks && !blocksLoading && blockData && (
+            <div className="text-muted small" style={{ marginTop: 4 }}>
+              API 响应：local={blockData.local ? "有" : "无"} · global={blockData.global ? "有" : "无"} · 本地块数={(blockData.local as any)?.Blocks?.length ?? 0} · 全局块数={(blockData.global as any)?.Blocks?.length ?? 0}
+            </div>
+          )}
+        </div>
+
+        {!blockHashEq && local && remote && (
+          <div className="inline-message warning" style={{ marginTop: 12 }}>
+            ⚠️ BlocksHash 不一致：虽然文件大小相同，但实际内容不同。差异字段已用橙色高亮。
+          </div>
+        )}
+        {blockHashEq && local && remote && (
+          <div className="inline-message success" style={{ marginTop: 12 }}>
+            ✅ BlocksHash 一致：文件内容完全相同，差异仅在于元数据（如修改时间）。
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ReceiveReviewPanel(props: {
   folder: FolderConfig;
   devices: DeviceConfig[];
@@ -4237,6 +4628,8 @@ function ReceiveReviewPanel(props: {
   compareSelection: Record<string, boolean>;
   onCompareSelectionChange: (value: Record<string, boolean>) => void;
   compareMessage: string;
+  compareIgnoreModTime: boolean;
+  onCompareIgnoreModTimeChange: (value: boolean) => void;
   onRefresh: () => void;
   onSyncSelected: () => void;
   onSyncVisible: () => void;
@@ -4249,6 +4642,7 @@ function ReceiveReviewPanel(props: {
     props.compareView === "incoming"
       ? "当前没有来自远端、会影响当前设备的差异。"
       : "当前筛选条件下没有差异项。";
+  const [detailEntry, setDetailEntry] = useState<CompareEntry | null>(null);
   const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({});
   const [columns, setColumns] = useState<ColumnDef[]>([
     { key: "checkbox", label: "", width: 40, minWidth: 40 },
@@ -4268,7 +4662,7 @@ function ReceiveReviewPanel(props: {
       let changed = false;
       for (const node of treeNodes) {
         if (!(node.key in next)) {
-          next[node.key] = true;
+          next[node.key] = false;
           changed = true;
         }
       }
@@ -4309,6 +4703,14 @@ function ReceiveReviewPanel(props: {
           <button className="ghost-button compact-button" onClick={() => setExpandedDirs((previous) => Object.keys(previous).reduce<Record<string, boolean>>((acc, key) => ({ ...acc, [key]: false }), {}))}>
             全部折叠
           </button>
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={props.compareIgnoreModTime}
+              onChange={(event) => props.onCompareIgnoreModTimeChange(event.target.checked)}
+            />
+            <span>忽略时间差异</span>
+          </label>
         </div>
 
         <div className="review-stats">
@@ -4319,11 +4721,15 @@ function ReceiveReviewPanel(props: {
           <span>可操作 {entries.filter((entry) => entry.canPrioritize).length} 项</span>
           <span>已选 {selectedCount} 项</span>
         </div>
-        <div className="review-mobile-hint">手机建议横屏查看；表格可左右滑动，按住列头分隔线可调整列宽。若 Android 内置 WebGUI 操作不顺，建议改用“在浏览器中打开”后再查看。</div>
+        <div className="review-mobile-hint">手机建议横屏查看；表格可左右滑动，按住列头分隔线可调整列宽。若 Android 内置 WebGUI 操作不顺，建议改用"在浏览器中打开"后再查看。</div>
 
         {props.compareMessage && <div className="inline-message info">{props.compareMessage}</div>}
         {props.compareError && <div className="inline-message danger">{props.compareError}</div>}
         {props.compareBusy && entries.length === 0 && <div className="compare-empty">正在加载接收审核数据...</div>}
+
+        {detailEntry && (
+          <FileDetailCompare entry={detailEntry} folder={props.folder.id} onClose={() => setDetailEntry(null)} />
+        )}
 
         <ResizableTable
           columns={columns}
@@ -4338,7 +4744,7 @@ function ReceiveReviewPanel(props: {
               if (row.type === "dir") {
                 const selectableEntries = row.entries.filter((entry) => entry.canPrioritize);
                 const selectedChildren = selectableEntries.filter((entry) => props.compareSelection[entry.path]).length;
-                const open = expandedDirs[row.node.key] !== false;
+                const open = expandedDirs[row.node.key] === true;
                 const branchActive = hasExpandedReviewDirDescendant(row.node, expandedDirs);
                 return (
                   <tr
@@ -4455,7 +4861,12 @@ function ReceiveReviewPanel(props: {
                       <div className="compare-tree-fileline" title={entry.path}>
                         <TreePrefix depth={row.depth} guides={row.guides} isLast={row.isLast} />
                         <span className="tree-file-dot" aria-hidden="true" />
-                        <span className="compare-tree-name compare-tree-file-name">{row.node.name}</span>
+                        <span
+                          className="compare-tree-name compare-tree-file-name"
+                          style={{ cursor: "pointer", textDecoration: "underline", color: "#0891b2" }}
+                          title="点击查看详细对比"
+                          onClick={() => setDetailEntry(entry)}
+                        >{row.node.name}</span>
                       </div>
                       {entry.renameCandidate ? (
                         <div className={`helper-line compare-pair-line role-${renameRole || "pair"}`}>
@@ -4551,6 +4962,8 @@ function TransferPanel(props: {
   completedUploads?: Array<{ folder: string; device: string; file: string; blocks: number; size: number; at: number }>;
   completedDownloads?: Array<{ folder: string; item: string; action: string; size: number; at: number }>;
   connectionRates?: { inbps: number; outbps: number };
+  progressUpdateIntervalS?: number;
+  onSaveProgressInterval?: (value: number) => void;
 }) {
   const folderDownload = props.downloadProgress?.[props.folderId] ?? {};
   const folderUpload = props.uploadProgress?.[props.folderId] ?? {};
@@ -4633,6 +5046,21 @@ function TransferPanel(props: {
           <div className="transfer-stat">
             <span className="transfer-stat-label">上行速率</span>
             <span className="transfer-stat-value">{formatRate(props.connectionRates?.outbps)}</span>
+          </div>
+          <div className="transfer-stat">
+            <span className="transfer-stat-label">刷新间隔</span>
+            <span className="transfer-stat-value" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+              <select
+                value={props.progressUpdateIntervalS ?? 1}
+                onChange={(e) => props.onSaveProgressInterval?.(Number(e.target.value))}
+                style={{ fontSize: "0.75rem", padding: "1px 2px", borderRadius: 3, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)" }}
+              >
+                <option value={1}>1秒</option>
+                <option value={2}>2秒</option>
+                <option value={5}>5秒</option>
+                <option value={10}>10秒</option>
+              </select>
+            </span>
           </div>
         </div>
       </div>
@@ -4760,6 +5188,8 @@ function BiDiffPanel(props: {
   bidiffSelection: Record<string, boolean>;
   onBidiffSelectionChange: (value: Record<string, boolean>) => void;
   bidiffMessage: string;
+  bidiffIgnoreModTime: boolean;
+  onBidiffIgnoreModTimeChange: (value: boolean) => void;
   onRefresh: () => void;
   onApplyLeftToRight: () => void;
   onApplyRightToLeft: () => void;
@@ -4779,6 +5209,8 @@ function BiDiffPanel(props: {
   connectionRates?: { inbps: number; outbps: number };
   workbenchView: "diff" | "transfer";
   onWorkbenchViewChange: (view: "diff" | "transfer") => void;
+  progressUpdateIntervalS?: number;
+  onSaveProgressInterval?: (value: number) => void;
 }) {
   const entries = useMemo(() => {
     const base = props.bidiff?.entries ?? [];
@@ -4819,6 +5251,7 @@ function BiDiffPanel(props: {
     readStoredChoice(BIDIFF_DENSITY_KEY, "normal", ["relaxed", "normal", "compact", "tight"] as const)
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [detailEntry, setDetailEntry] = useState<CompareEntry | null>(null);
   const [treeMode, setTreeMode] = useState(true);
   const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({});
   const [columns, setColumns] = useState<ColumnDef[]>(() => biDiffColumnsForDensity(density, false));
@@ -4846,7 +5279,7 @@ function BiDiffPanel(props: {
       let changed = false;
       for (const node of treeNodes) {
         if (!(node.key in next)) {
-          next[node.key] = true;
+          next[node.key] = false;
           changed = true;
         }
       }
@@ -4872,7 +5305,7 @@ function BiDiffPanel(props: {
     return (
       <div className="review-modal-layout">
         <div className="review-modal-main">
-          <div className="empty-mini">这个文件夹当前没有共享设备，所以没有可裁决的右侧索引。</div>
+          <div className="empty-mini">这个文件夹当前没有共享设备，所以没有可接发的右侧索引。</div>
         </div>
       </div>
     );
@@ -4893,12 +5326,14 @@ function BiDiffPanel(props: {
             completedUploads={props.completedUploads}
             completedDownloads={props.completedDownloads}
             connectionRates={props.connectionRates}
+            progressUpdateIntervalS={props.progressUpdateIntervalS}
+            onSaveProgressInterval={props.onSaveProgressInterval}
           />
         ) : (
         <>
         <div className="review-toolbar review-toolbar-bidiff">
           <label>
-            <span>裁决列</span>
+            <span>接发列</span>
             <button
               className="mini-button"
               onClick={() => {
@@ -4906,7 +5341,7 @@ function BiDiffPanel(props: {
                   prev.map((col) => (col.key === "action" ? { ...col, visible: col.visible === false ? true : false } : col))
                 );
               }}
-              title={columns.find((c) => c.key === "action")?.visible !== false ? "隐藏裁决列" : "显示裁决列"}
+              title={columns.find((c) => c.key === "action")?.visible !== false ? "隐藏接发列" : "显示接发列"}
             >
               {columns.find((c) => c.key === "action")?.visible !== false ? "隐藏" : "显示"}
             </button>
@@ -4975,6 +5410,14 @@ function BiDiffPanel(props: {
               <option value="full">详细</option>
             </select>
           </label>
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={props.bidiffIgnoreModTime}
+              onChange={(event) => props.onBidiffIgnoreModTimeChange(event.target.checked)}
+            />
+            <span>忽略时间</span>
+          </label>
           <label>
             <span>列表字体</span>
             <select
@@ -5008,7 +5451,7 @@ function BiDiffPanel(props: {
           </label>
         </div>
         <div className="review-stats">
-          <span className="badge badge-sm tone-info">{props.mode === "peer" ? "对等差异" : "裁决"}</span>
+          <span className="badge badge-sm tone-info">{props.mode === "peer" ? "直传" : "接发"}</span>
           <span className={`badge badge-sm tone-${props.bidiff?.rightConnected ? "success" : "warning"}`}>{props.bidiff?.rightConnected ? "右侧已连接" : "右侧离线"}</span>
           {(selectedLeftToRight > 0 || selectedRightToLeft > 0 || selectedBlocked > 0) && (
             <span className="review-selection-info">
@@ -5087,16 +5530,19 @@ function BiDiffPanel(props: {
         </div>
         {props.mode === "bidiff" && (!props.bidiff?.manualSync || !props.bidiff?.manualPublish) && (
           <div className="inline-message warning">
-            当前文件夹还在自动同步模式。为了保证“只按你选中的文件裁决”，双向裁决建议与手动模式配合使用：
+            当前文件夹还在自动同步模式。为了保证"只按你选中的文件接发"，双向接发建议与手动模式配合使用：
             {!props.bidiff?.manualSync && " 先开启手动审核接收；"}
             {!props.bidiff?.manualPublish && " 先开启手动审核发布；"}
           </div>
         )}
         {props.bidiffMessage && <div className="inline-message info">{props.bidiffMessage}</div>}
         {props.bidiffError && <div className="inline-message danger">{props.bidiffError}</div>}
+        {detailEntry && (
+          <FileDetailCompare entry={detailEntry} folder={props.folder.id} onClose={() => setDetailEntry(null)} />
+        )}
         {hasSelection && selectedLeftToRight === 0 && selectedRightToLeft === 0 && (
           <div className="inline-message warning">
-            当前已选 {selectedTotal} 项，但这些条目暂时都不可执行，所以“采用左侧 / 采用右侧”仍然是 0。
+            当前已选 {selectedTotal} 项，但这些条目暂时都不可执行，所以"采用左侧 / 采用右侧"仍然是 0。
           </div>
         )}
 
@@ -5106,7 +5552,7 @@ function BiDiffPanel(props: {
               if (row.type === "dir") {
                 const selectableEntries = row.entries;
                 const selectedCount = selectableEntries.filter((entry) => props.bidiffSelection[entry.path]).length;
-                const open = expandedDirs[row.node.key] !== false;
+                const open = expandedDirs[row.node.key] === true;
                 return (
                   <div key={row.key} className={`bidiff-mobile-dir${selectedCount > 0 ? " contains-selected" : ""}${open ? " is-open" : ""}`}>
                     <div className="bidiff-mobile-dir-head">
@@ -5172,7 +5618,12 @@ function BiDiffPanel(props: {
                         <span className={`badge compare-action-badge ${actionability.className}`} title={actionability.title}>{actionability.label}</span>
                       </div>
                       <div className="path-line" title={bidiffRenameInlineText(entry, entry.path)}>
-                        <span className={`compare-tree-file-combined ${renameRole === "new" ? "rename-new-path" : renameRole === "old" ? "rename-old-path" : ""}`}>
+                        <span
+                          className={`compare-tree-file-combined ${renameRole === "new" ? "rename-new-path" : renameRole === "old" ? "rename-old-path" : ""}`}
+                          style={{ cursor: "pointer", textDecoration: "underline", color: "#0891b2" }}
+                          title="点击查看详细对比"
+                          onClick={() => setDetailEntry({ path: entry.path, status: entry.status, local: entry.left, remote: entry.right, renameCandidate: entry.renameCandidate, canPrioritize: entry.canApplyLeftToRight || entry.canApplyRightToLeft })}
+                        >
                           {bidiffRenameInlineText(entry, entry.path)}
                         </span>
                       </div>
@@ -5234,7 +5685,7 @@ function BiDiffPanel(props: {
                 const hasSelectedDescendants = selectedCount > 0;
                 const leftLiveCount = row.entries.filter((entry) => bidiffHasLiveFile(entry.left)).length;
                 const rightLiveCount = row.entries.filter((entry) => bidiffHasLiveFile(entry.right)).length;
-                const open = expandedDirs[row.node.key] !== false;
+                const open = expandedDirs[row.node.key] === true;
                 const branchActive = open || hasExpandedDirDescendant(row.node, expandedDirs);
                 return (
                   <tr
@@ -5267,7 +5718,7 @@ function BiDiffPanel(props: {
                     {columns.find((c) => c.key === "action")?.visible !== false && (
                       <td>
                         <div className="compare-cell-center">
-                          <span className="badge compare-action-badge action-both" title="目录包含可裁决子项">
+                          <span className="badge compare-action-badge action-both" title="目录包含可接发子项">
                             ≡
                           </span>
                         </div>
@@ -5349,13 +5800,23 @@ function BiDiffPanel(props: {
                         <div className="compare-tree-fileline" title={bidiffRenameInlineText(entry, entry.path)}>
                           <TreePrefix depth={row.depth} guides={row.guides} isLast={row.isLast} />
                           <span className="tree-file-dot" aria-hidden="true" />
-                          <span className={`compare-tree-name compare-tree-file-name compare-tree-file-combined${renameRole === "new" ? " rename-new-path" : renameRole === "old" ? " rename-old-path" : ""}`}>
+                          <span
+                            className={`compare-tree-name compare-tree-file-name compare-tree-file-combined${renameRole === "new" ? " rename-new-path" : renameRole === "old" ? " rename-old-path" : ""}`}
+                            style={{ cursor: "pointer", textDecoration: "underline", color: "#0891b2" }}
+                            title="点击查看详细对比"
+                            onClick={() => setDetailEntry({ path: entry.path, status: entry.status, local: entry.left, remote: entry.right, renameCandidate: entry.renameCandidate, canPrioritize: entry.canApplyLeftToRight || entry.canApplyRightToLeft })}
+                          >
                             {bidiffRenameInlineText(entry, row.node.name)}
                           </span>
                         </div>
                       ) : (
                         <div className="compare-path compare-main-path compare-main-path-combined" title={bidiffRenameInlineText(entry, entry.path)}>
-                          <span className={`compare-tree-file-combined ${renameRole === "new" ? "rename-new-path" : renameRole === "old" ? "rename-old-path" : ""}`}>
+                          <span
+                            className={`compare-tree-file-combined ${renameRole === "new" ? "rename-new-path" : renameRole === "old" ? "rename-old-path" : ""}`}
+                            style={{ cursor: "pointer", textDecoration: "underline", color: "#0891b2" }}
+                            title="点击查看详细对比"
+                            onClick={() => setDetailEntry({ path: entry.path, status: entry.status, local: entry.left, remote: entry.right, renameCandidate: entry.renameCandidate, canPrioritize: entry.canApplyLeftToRight || entry.canApplyRightToLeft })}
+                          >
                             {bidiffRenameInlineText(entry, entry.path)}
                           </span>
                         </div>
@@ -5532,7 +5993,7 @@ function PublishReviewPanel(props: {
       let changed = false;
       for (const node of treeNodes) {
         if (!(node.key in next)) {
-          next[node.key] = true;
+          next[node.key] = false;
           changed = true;
         }
       }
@@ -5573,7 +6034,7 @@ function PublishReviewPanel(props: {
           <span>可清理 {clearableCount} 项</span>
           <span>已选 {selectedCount} 项</span>
         </div>
-        <div className="review-mobile-hint">手机建议横屏查看；表格可左右滑动，按住列头分隔线可调整列宽。若 Android 内置 WebGUI 操作不顺，建议改用“在浏览器中打开”后再查看。</div>
+        <div className="review-mobile-hint">手机建议横屏查看；表格可左右滑动，按住列头分隔线可调整列宽。若 Android 内置 WebGUI 操作不顺，建议改用"在浏览器中打开"后再查看。</div>
 
         {props.publishMessage && <div className="inline-message info">{props.publishMessage}</div>}
         {props.publishError && <div className="inline-message danger">{props.publishError}</div>}
@@ -5588,7 +6049,7 @@ function PublishReviewPanel(props: {
               if (row.type === "dir") {
                 const selectableEntries = row.entries.filter((entry) => entry.canPublish || entry.canClear);
                 const selectedChildren = selectableEntries.filter((entry) => props.publishSelection[entry.path]).length;
-                const open = expandedDirs[row.node.key] !== false;
+                const open = expandedDirs[row.node.key] === true;
                 const branchActive = hasExpandedReviewDirDescendant(row.node, expandedDirs);
                 return (
                   <tr
@@ -6083,7 +6544,7 @@ function SettingsHubPanel(props: {
             </button>
           </div>
         </div>
-        <div className="device-meta">“登出”只会退出 Web GUI；这里的“完全关闭 Syncthing”会退出后端程序并停止同步。</div>
+        <div className="device-meta">"登出"只会退出 Web GUI；这里的"完全关闭 Syncthing"会退出后端程序并停止同步。</div>
         {props.systemActionMessage && <div className="inline-message info">{props.systemActionMessage}</div>}
       </div>
     </section>
@@ -6328,6 +6789,20 @@ function FolderSettingsPanel(props: {
               <div className="help-block">由外部命令处理版本控制。该命令必须把文件从共享文件夹中移走。</div>
             )}
           </label>
+
+          {guiVersioning.selector !== "none" && (
+            <label className="toggle-card">
+              <input
+                type="checkbox"
+                checked={draft.archiveMetadataOnly ?? false}
+                onChange={(event) => update({ archiveMetadataOnly: event.target.checked })}
+              />
+              <span>仅元数据变更时跳过归档</span>
+              <div className="help-block">
+                当文件内容未变（区块哈希一致）仅修改时间或权限等元数据变化时，不触发版本归档，直接原地更新文件元数据。
+              </div>
+            </label>
+          )}
 
           {(guiVersioning.selector === "trashcan" || guiVersioning.selector === "simple") && (
             <label>
@@ -6673,6 +7148,90 @@ function FolderSettingsPanel(props: {
   );
 }
 
+function DiscoveredDevicesList(props: {
+  discoveryCache: DiscoveryCacheResponse;
+  pendingDevices: PendingDevicesResponse;
+  existingDeviceIds: Set<string>;
+  onSelectDevice: (deviceID: string) => void;
+}) {
+  const { discoveryCache, pendingDevices, existingDeviceIds, onSelectDevice } = props;
+
+  // Filter out already configured devices
+  const pendingEntries = useMemo(
+    () =>
+      Object.entries(pendingDevices)
+        .filter(([id]) => !existingDeviceIds.has(id))
+        .sort((a, b) => new Date(b[1].time).getTime() - new Date(a[1].time).getTime()),
+    [pendingDevices, existingDeviceIds],
+  );
+
+  const discoveredEntries = useMemo(
+    () =>
+      Object.entries(discoveryCache)
+        .filter(([id]) => !existingDeviceIds.has(id) && !pendingDevices[id])
+        .filter(([, entry]) => entry.addresses && entry.addresses.length > 0)
+        .sort((a, b) => a[0].localeCompare(b[0])),
+    [discoveryCache, existingDeviceIds, pendingDevices],
+  );
+
+  const hasEntries = pendingEntries.length > 0 || discoveredEntries.length > 0;
+
+  if (!hasEntries) {
+    return null;
+  }
+
+  return (
+    <div className="discovered-devices-section">
+      <div className="section-title">已发现的设备</div>
+      <div className="help-block">以下设备在局域网或全局发现中被检测到，点击即可快速添加。</div>
+
+      {pendingEntries.length > 0 && (
+        <div className="discovered-device-group">
+          <div className="group-title">待处理设备（曾尝试连接）</div>
+          {pendingEntries.map(([deviceID, entry]) => (
+            <div key={deviceID} className="discovered-device-card pending">
+              <div className="discovered-device-info">
+                <div className="device-name">{entry.name || "未知设备"}</div>
+                <div className="device-address">{entry.address}</div>
+                <div className="device-id">{formatDeviceID(deviceID)}</div>
+              </div>
+              <button className="primary-button small-button" onClick={() => onSelectDevice(deviceID)}>
+                添加此设备
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {discoveredEntries.length > 0 && (
+        <div className="discovered-device-group">
+          <div className="group-title">局域网/全局发现的设备</div>
+          {discoveredEntries.map(([deviceID, entry]) => (
+            <div key={deviceID} className="discovered-device-card">
+              <div className="discovered-device-info">
+                <div className="device-id">{formatDeviceID(deviceID)}</div>
+                <div className="device-address">{entry.addresses.join(", ")}</div>
+              </div>
+              <button className="ghost-button small-button" onClick={() => onSelectDevice(deviceID)}>
+                选择
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatDeviceID(id: string): string {
+  // Format device ID with dashes for readability: XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX
+  const clean = id.replace(/-/g, "");
+  if (clean.length === 56) {
+    return clean.match(/.{4}/g)?.join("-") ?? id;
+  }
+  return id;
+}
+
 function DeviceSettingsPanel(props: {
   draft: DeviceConfig;
   onChange: (value: DeviceConfig) => void;
@@ -6687,6 +7246,9 @@ function DeviceSettingsPanel(props: {
   message: string;
   isNew: boolean;
   onDelete?: () => void;
+  discoveryCache?: DiscoveryCacheResponse;
+  pendingDevices?: PendingDevicesResponse;
+  existingDeviceIds?: Set<string>;
 }) {
   const draft = props.draft;
   const update = (patch: Partial<DeviceConfig>) => props.onChange({ ...draft, ...patch });
@@ -6780,7 +7342,7 @@ function DeviceSettingsPanel(props: {
               <span>设备 ID</span>
               <input value={draft.deviceID} disabled={!props.isNew} onChange={(event) => update({ deviceID: event.target.value })} />
               {props.isNew ? (
-                <div className="help-block">在另一台设备的“操作 &gt; 显示 ID”中可以找到要输入的设备 ID。添加新设备时，别忘了另一端也需要添加当前设备。</div>
+                <div className="help-block">在另一台设备的"操作 &gt; 显示 ID"中可以找到要输入的设备 ID。添加新设备时，别忘了另一端也需要添加当前设备。</div>
               ) : null}
             </label>
             <label>
@@ -6793,6 +7355,15 @@ function DeviceSettingsPanel(props: {
               <input type="checkbox" checked={Boolean(draft.paused)} onChange={(event) => update({ paused: event.target.checked })} />
             </label>
           </div>
+
+          {props.isNew && (
+            <DiscoveredDevicesList
+              discoveryCache={props.discoveryCache ?? {}}
+              pendingDevices={props.pendingDevices ?? {}}
+              existingDeviceIds={props.existingDeviceIds ?? new Set()}
+              onSelectDevice={(deviceID) => update({ deviceID })}
+            />
+          )}
         </div>
       )}
 
@@ -6821,7 +7392,7 @@ function DeviceSettingsPanel(props: {
                 />
                 <span>自动接受</span>
               </label>
-              <div className="help-block">当此远端设备共享一个当前设备尚不存在的新文件夹时，当前设备会自动按默认路径创建并接受该文件夹；关闭后，这类邀请会出现在“待接受共享文件夹”面板中，由你手动确认。</div>
+              <div className="help-block">当此远端设备共享一个当前设备尚不存在的新文件夹时，当前设备会自动按默认路径创建并接受该文件夹；关闭后，这类邀请会出现在"待接受共享文件夹"面板中，由你手动确认。</div>
             </div>
           </div>
 
@@ -6887,7 +7458,7 @@ function DeviceSettingsPanel(props: {
                   })
                 }
               />
-              <div className="help-block">输入以半角逗号分隔的（"tcp://ip:port", "tcp://host:port"）设备地址，或者输入“dynamic”以自动发现设备地址。</div>
+              <div className="help-block">输入以半角逗号分隔的（"tcp://ip:port", "tcp://host:port"）设备地址，或者输入"dynamic"以自动发现设备地址。</div>
             </label>
             <label>
               <span>压缩</span>

@@ -1133,6 +1133,92 @@ button:disabled {
   font-size: 0.78rem;
 }
 
+.discovered-devices-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.discovered-devices-section .section-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.discovered-devices-section .help-block {
+  margin-bottom: 12px;
+}
+
+.discovered-device-group {
+  margin-bottom: 16px;
+}
+
+.discovered-device-group:last-child {
+  margin-bottom: 0;
+}
+
+.group-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.discovered-device-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  transition: background 0.15s ease;
+}
+
+.discovered-device-card:hover {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.discovered-device-card.pending {
+  border-left: 3px solid var(--accent);
+}
+
+.discovered-device-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.discovered-device-info .device-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+
+.discovered-device-info .device-address {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+
+.discovered-device-info .device-id {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+  word-break: break-all;
+}
+
+.small-button {
+  min-height: 30px;
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
 .inline-field {
   display: flex;
   align-items: center;
@@ -2629,14 +2715,33 @@ button:disabled {
 
 .review-toolbar {
   display: grid;
-  grid-template-columns: 180px minmax(0, 1fr) 140px;
+  grid-template-columns: 180px minmax(0, 1fr) 140px 120px;
   gap: 8px;
   align-items: end;
   min-width: 0;
 }
 
 .review-toolbar-bidiff {
-  grid-template-columns: 60px 72px 98px minmax(72px, 118px) 72px 64px 72px;
+  grid-template-columns: 60px 72px 98px minmax(72px, 118px) 72px 64px 72px 72px;
+}
+
+.review-toolbar label.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.review-toolbar label.checkbox-label input[type="checkbox"] {
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.review-toolbar label.checkbox-label span {
+  font-size: 0.85rem;
+  color: #666;
+  user-select: none;
 }
 
 .review-toolbar-bidiff label {

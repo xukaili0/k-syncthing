@@ -25,10 +25,11 @@ const (
 )
 
 type BiDiffOptions struct {
-	Page    int
-	PerPage int
-	Prefix  string
-	View    string
+	Page          int
+	PerPage       int
+	Prefix        string
+	View          string
+	IgnoreModTime bool
 }
 
 type BiDiffEntry struct {
@@ -98,7 +99,7 @@ func (m *model) BiDiffFolderFiles(folder string, device protocol.DeviceID, opts 
 		return BiDiffResult{}, err
 	}
 
-	compareEntries := buildCompareEntries(leftFiles, rightFiles, cfg.ModTimeWindow())
+	compareEntries := buildCompareEntries(leftFiles, rightFiles, cfg.ModTimeWindow(), opts.IgnoreModTime)
 	compareEntries = filterCompareEntries(compareEntries, opts.View)
 	total := len(compareEntries)
 
@@ -173,7 +174,7 @@ func (m *model) PeerDiffFolderFiles(folder string, device protocol.DeviceID, opt
 		previewMode = "remote-preview-index-plus-local"
 	}
 
-	compareEntries := buildCompareEntries(leftFiles, rightFiles, cfg.ModTimeWindow())
+	compareEntries := buildCompareEntries(leftFiles, rightFiles, cfg.ModTimeWindow(), opts.IgnoreModTime)
 	compareEntries = filterCompareEntries(compareEntries, opts.View)
 	total := len(compareEntries)
 
@@ -449,7 +450,7 @@ func (m *model) expandBiDiffSelectionWithRename(folder string, device protocol.D
 			}
 		}
 	}
-	entries := buildCompareEntries(leftFiles, rightFiles, cfg.ModTimeWindow())
+	entries := buildCompareEntries(leftFiles, rightFiles, cfg.ModTimeWindow(), false)
 	return expandSelectionWithCompareRename(entries, files), nil
 }
 
@@ -514,7 +515,7 @@ func (m *model) applyRemoteSideSelectedWithPolicy(folder string, device protocol
 		}
 		entry := CompareEntry{
 			Path:   file,
-			Status: compareEntryStatus(localOK, remoteOK, local, remote, cfg.ModTimeWindow()),
+			Status: compareEntryStatus(localOK, remoteOK, local, remote, cfg.ModTimeWindow(), false),
 		}
 		if localOK {
 			entry.Local = cloneFileInfo(local)

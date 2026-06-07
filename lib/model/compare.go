@@ -29,10 +29,11 @@ const (
 )
 
 type CompareOptions struct {
-	Page    int
-	PerPage int
-	Prefix  string
-	View    string
+	Page          int
+	PerPage       int
+	Prefix        string
+	View          string
+	IgnoreModTime bool
 }
 
 type CompareEntry struct {
@@ -80,7 +81,7 @@ func (m *model) CompareFolderFiles(folder string, device protocol.DeviceID, opts
 		return CompareResult{}, err
 	}
 
-	entries := buildCompareEntries(localFiles, remoteFiles, cfg.ModTimeWindow())
+	entries := buildCompareEntries(localFiles, remoteFiles, cfg.ModTimeWindow(), opts.IgnoreModTime)
 	entries = filterCompareEntries(entries, opts.View)
 	total := len(entries)
 
@@ -156,7 +157,7 @@ func (m *model) collectCompareFiles(folder string, device protocol.DeviceID, pre
 	return files, errFn()
 }
 
-func buildCompareEntries(localFiles, remoteFiles map[string]protocol.FileInfo, modTimeWindow time.Duration) []CompareEntry {
+func buildCompareEntries(localFiles, remoteFiles map[string]protocol.FileInfo, modTimeWindow time.Duration, ignoreModTime bool) []CompareEntry {
 	names := make([]string, 0, len(localFiles)+len(remoteFiles))
 	seen := make(map[string]struct{}, len(localFiles)+len(remoteFiles))
 
@@ -180,7 +181,7 @@ func buildCompareEntries(localFiles, remoteFiles map[string]protocol.FileInfo, m
 
 		entry := CompareEntry{
 			Path:   name,
-			Status: compareEntryStatus(localOK, remoteOK, local, remote, modTimeWindow),
+			Status: compareEntryStatus(localOK, remoteOK, local, remote, modTimeWindow, ignoreModTime),
 		}
 		if localOK {
 			entry.Local = cloneFileInfo(local)
@@ -211,7 +212,7 @@ func pruneInertCompareEntries(entries []CompareEntry) []CompareEntry {
 	return filtered
 }
 
-func compareEntryStatus(localOK, remoteOK bool, local, remote protocol.FileInfo, modTimeWindow time.Duration) string {
+func compareEntryStatus(localOK, remoteOK bool, local, remote protocol.FileInfo, modTimeWindow time.Duration, ignoreModTime bool) string {
 	switch {
 	case !localOK && !remoteOK:
 		return CompareViewSame
@@ -236,6 +237,8 @@ func compareEntryStatus(localOK, remoteOK bool, local, remote protocol.FileInfo,
 	case local.Type != remote.Type:
 		return "type-changed"
 	case local.IsEquivalent(remote, modTimeWindow):
+		return "same"
+	case ignoreModTime && contentMatchesIgnoringModTime(local, remote):
 		return "same"
 	default:
 		return "modified"
@@ -300,6 +303,21 @@ func sameSizedBlocks(local, remote *protocol.FileInfo) bool {
 		return false
 	}
 	return local.Size == remote.Size && bytes.Equal(local.BlocksHash, remote.BlocksHash)
+}
+
+// contentMatchesIgnoringModTime checks whether two FileInfo entries represent
+// the same file content, regardless of modification time differences.
+// This is used when the user has chosen to ignore mtime in the comparison view.
+func contentMatchesIgnoringModTime(a, b protocol.FileInfo) bool {
+	if a.Type != b.Type || a.Size != b.Size {
+		return false
+	}
+	// Both sides must have block info to compare content.
+	if len(a.BlocksHash) > 0 && len(b.BlocksHash) > 0 {
+		return bytes.Equal(a.BlocksHash, b.BlocksHash)
+	}
+	// Fall back to full block list comparison if BlocksHash is not available.
+	return a.BlocksEqual(b)
 }
 
 func sortCompareEntries(entries []CompareEntry) {

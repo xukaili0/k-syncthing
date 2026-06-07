@@ -51,6 +51,7 @@ export type FolderConfig = {
   sendXattrs?: boolean;
   junctionsAsDirs?: boolean;
   copyOwnershipFromParent?: boolean;
+  archiveMetadataOnly?: boolean;
   devices: FolderDevice[];
   _guiVersioning?: GuiVersioningDraft;
   _addIgnores?: boolean;
@@ -74,17 +75,67 @@ export type DeviceConfig = {
   untrusted?: boolean;
   remoteGUIPort?: number;
   numConnections?: number;
+  ignoredFolders?: ObservedFolder[];
+};
+
+export type ObservedDevice = {
+  time: string;
+  deviceID: string;
+  name?: string;
+  address?: string;
+};
+
+export type ObservedFolder = {
+  time: string;
+  id: string;
+  label?: string;
+};
+
+export type DiscoveryCacheEntry = {
+  addresses: string[];
+};
+
+export type DiscoveryCacheResponse = Record<string, DiscoveryCacheEntry>;
+
+export type PendingDeviceEntry = {
+  time: string;
+  name: string;
+  address: string;
+};
+
+export type PendingDevicesResponse = Record<string, PendingDeviceEntry>;
+
+export type GuiConfig = {
+  enabled?: boolean;
+  address?: string;
+  unixSocketPermissions?: string;
+  user?: string;
+  password?: string;
+  authMode?: string;
+  metricsWithoutAuth?: boolean;
+  useTLS?: boolean;
+  apiKey?: string;
+  insecureAdminAccess?: boolean;
+  theme?: string;
+  insecureSkipHostCheck?: boolean;
+  insecureAllowFrameLoading?: boolean;
+  sendBasicAuthPrompt?: boolean;
+};
+
+export type LDAPConfig = {
+  address?: string;
+  bindDN?: string;
+  transport?: number;
+  insecureSkipVerify?: boolean;
+  searchBaseDN?: string;
+  searchFilter?: string;
 };
 
 export type ConfigResponse = {
   folders: FolderConfig[];
   devices: DeviceConfig[];
-  gui: {
-    theme: string;
-    authMode?: string;
-    user?: string;
-    password?: string;
-  };
+  gui: GuiConfig;
+  remoteIgnoredDevices?: ObservedDevice[];
 };
 
 export type SystemStatus = {
@@ -93,12 +144,16 @@ export type SystemStatus = {
   discoveryStatus: Record<string, { error?: string }>;
   connectionServiceStatus: Record<string, { error?: string }>;
   guiAddressUsed: string;
+  guiAddressOverridden?: boolean;
   uptime: number;
+  urVersionMax?: number;
 };
 
 export type VersionResponse = {
   version: string;
   longVersion: string;
+  isCandidate?: boolean;
+  isBeta?: boolean;
 };
 
 export type DeviceConnection = {
@@ -265,21 +320,56 @@ export type PendingPublishResult = {
   folderCanPublish: boolean;
 };
 
+export type MinHomeDiskFree = {
+  value: number;
+  unit: string;
+};
+
 export type OptionsConfig = {
+  listenAddresses?: string[];
+  globalAnnounceServers?: string[];
   globalAnnounceEnabled?: boolean;
   localAnnounceEnabled?: boolean;
-  relaysEnabled?: boolean;
-  natEnabled?: boolean;
-  startBrowser?: boolean;
-  autoUpgradeIntervalH?: number;
-  progressUpdateIntervalS?: number;
-  reconnectionIntervalS?: number;
+  localAnnouncePort?: number;
+  localAnnounceMCAddr?: string;
   maxSendKbps?: number;
   maxRecvKbps?: number;
+  reconnectionIntervalS?: number;
+  relaysEnabled?: boolean;
+  relayReconnectIntervalM?: number;
+  startBrowser?: boolean;
+  natEnabled?: boolean;
+  natLeaseMinutes?: number;
+  natRenewalMinutes?: number;
+  natTimeoutSeconds?: number;
+  urAccepted?: number;
+  urUniqueId?: string;
+  urURL?: string;
+  urPostInsecurely?: boolean;
+  urInitialDelayS?: number;
+  autoUpgradeIntervalH?: number;
+  upgradeToPreReleases?: boolean;
+  keepTemporariesH?: number;
+  cacheIgnoredFiles?: boolean;
+  progressUpdateIntervalS?: number;
   limitBandwidthInLan?: boolean;
+  minHomeDiskFree?: MinHomeDiskFree;
+  releasesURL?: string;
   alwaysLocalNets?: string[];
+  overwriteRemoteDeviceNamesOnConnect?: boolean;
+  tempIndexMinBlocks?: number;
+  setLowPriority?: boolean;
+  maxFolderConcurrency?: number;
+  crashReportingEnabled?: boolean;
+  stunKeepaliveStartS?: number;
+  stunKeepaliveMinS?: number;
+  stunServers?: string[];
+  announceLANAddresses?: boolean;
+  sendFullIndexOnUpgrade?: boolean;
+  featureFlags?: string[];
   connectionLimitEnough?: number;
   connectionLimitMax?: number;
+  unackedNotificationID?: string;
 };
 
 export type IgnoreResponse = {

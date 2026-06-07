@@ -1157,7 +1157,7 @@ func TestPullSymlinkOverExistingWindows(t *testing.T) {
 
 	scanChan := make(chan string)
 
-	changed, err := f.pullerIteration(t.Context(), scanChan)
+	changed, err := f.pullerIteration(t.Context(), scanChan, nil)
 	must(t, err)
 	if changed != 1 {
 		t.Error("Expected one change in pull, got", changed)

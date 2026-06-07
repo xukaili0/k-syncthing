@@ -19,7 +19,7 @@ func TestBuildCompareEntriesStatuses(t *testing.T) {
 		"only-remote":  testCompareFile("only-remote", 12, 100, []byte("remote-only")),
 	}
 
-	entries := buildCompareEntries(local, remote, 0)
+	entries := buildCompareEntries(local, remote, 0, false)
 	got := map[string]string{}
 	for _, entry := range entries {
 		got[entry.Path] = entry.Status
@@ -48,7 +48,7 @@ func TestBuildCompareEntriesRenameCandidates(t *testing.T) {
 		"new/name.txt": testCompareFile("new/name.txt", 10, 100, hash),
 	}
 
-	entries := buildCompareEntries(local, remote, 0)
+	entries := buildCompareEntries(local, remote, 0, false)
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
@@ -83,7 +83,7 @@ func TestBuildCompareEntriesRenameCandidatesAcrossDeleteTombstones(t *testing.T)
 		"exe/MinerU-0.12.0-setup.exe": remoteMoved,
 	}
 
-	entries := buildCompareEntries(local, remote, 0)
+	entries := buildCompareEntries(local, remote, 0, false)
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
@@ -113,11 +113,13 @@ func TestBuildCompareEntriesRenameCandidatesAcrossDeleteTombstones(t *testing.T)
 }
 
 func TestFilterCompareEntries(t *testing.T) {
+	lfTmp := testCompareFile("x", 1, 1, []byte("x"))
+	lf := &lfTmp
 	entries := []CompareEntry{
-		{Path: "same.txt", Status: "same"},
-		{Path: "modified.txt", Status: "modified"},
-		{Path: "deleted.txt", Status: "deleted-remote"},
-		{Path: "rename.txt", Status: "only-remote", RenameCandidate: "old.txt"},
+		{Path: "same.txt", Status: "same", Local: lf, Remote: lf},
+		{Path: "modified.txt", Status: "modified", Local: lf, Remote: lf},
+		{Path: "deleted.txt", Status: "deleted-remote", Local: lf, Remote: lf},
+		{Path: "rename.txt", Status: "only-remote", Remote: lf, RenameCandidate: "old.txt"},
 	}
 
 	if got := len(filterCompareEntries(entries, CompareViewDifferent)); got != 3 {
@@ -140,7 +142,7 @@ func TestBuildCompareEntriesDoesNotTreatManualPolicyFlagsAsConflict(t *testing.T
 	entries := buildCompareEntries(
 		map[string]protocol.FileInfo{"file.zip": localDeleted},
 		map[string]protocol.FileInfo{"file.zip": remoteFile},
-		0,
+		0, false,
 	)
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))

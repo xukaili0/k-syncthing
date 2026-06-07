@@ -36,6 +36,16 @@
       </div>
     </div>
 
+    <div class="row" style="margin-top: 8px;">
+      <div class="col-sm-12">
+        <label class="checkbox-inline">
+          <input type="checkbox" ng-model="compare.ignoreModTime" ng-change="refreshCompare(1, compare.perpage)">
+          <span>忽略时间差异</span>
+        </label>
+        <span class="text-muted small">（内容相同但修改时间不同的文件将视为一致，不再标记为"modified"）</span>
+      </div>
+    </div>
+
     <div class="clearfix" style="margin-top: 10px; margin-bottom: 10px;">
       <div class="pull-left">
         <span class="label label-info">{{compare.manualSync ? '手动审核接收' : '文件对比'}}</span>

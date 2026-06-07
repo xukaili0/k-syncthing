@@ -1178,6 +1178,9 @@ angular.module('syncthing.core')
             if ($scope.compare.prefix) {
                 url += '&prefix=' + encodeURIComponent($scope.compare.prefix);
             }
+            if ($scope.compare.ignoreModTime) {
+                url += '&ignoreModTime=true';
+            }
 
             $http.get(url).success(function (data) {
                 var previousSelected = angular.copy($scope.compare.selected || {});

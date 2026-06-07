@@ -946,10 +946,11 @@ func (s *service) getDBCompare(w http.ResponseWriter, r *http.Request) {
 
 	page, perpage := getPagingParams(qs)
 	result, err := s.model.CompareFolderFiles(folder, deviceID, model.CompareOptions{
-		Page:    page,
-		PerPage: perpage,
-		Prefix:  qs.Get("prefix"),
-		View:    qs.Get("view"),
+		Page:          page,
+		PerPage:       perpage,
+		Prefix:        qs.Get("prefix"),
+		View:          qs.Get("view"),
+		IgnoreModTime: qs.Get("ignoreModTime") == "true",
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -1025,10 +1026,11 @@ func (s *service) getDBBiDiff(w http.ResponseWriter, r *http.Request) {
 	page, perpage := getPagingParams(qs)
 
 	result, err := s.model.BiDiffFolderFiles(folder, deviceID, model.BiDiffOptions{
-		Page:    page,
-		PerPage: perpage,
-		Prefix:  qs.Get("prefix"),
-		View:    qs.Get("view"),
+		Page:          page,
+		PerPage:       perpage,
+		Prefix:        qs.Get("prefix"),
+		View:          qs.Get("view"),
+		IgnoreModTime: qs.Get("ignoreModTime") == "true",
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -1073,10 +1075,11 @@ func (s *service) getDBPeerDiff(w http.ResponseWriter, r *http.Request) {
 	page, perpage := getPagingParams(qs)
 
 	result, err := s.model.PeerDiffFolderFiles(folder, deviceID, model.BiDiffOptions{
-		Page:    page,
-		PerPage: perpage,
-		Prefix:  qs.Get("prefix"),
-		View:    qs.Get("view"),
+		Page:          page,
+		PerPage:       perpage,
+		Prefix:        qs.Get("prefix"),
+		View:          qs.Get("view"),
+		IgnoreModTime: qs.Get("ignoreModTime") == "true",
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -2201,6 +2204,17 @@ type jsonPreviewIndexEntry model.PreviewIndexEntry
 func (f jsonFileInfo) MarshalJSON() ([]byte, error) {
 	m := fileIntfJSONMap(protocol.FileInfo(f))
 	m["numBlocks"] = len(f.Blocks)
+	if len(f.Blocks) > 0 {
+		blocks := make([]map[string]interface{}, len(f.Blocks))
+		for i, b := range f.Blocks {
+			blocks[i] = map[string]interface{}{
+				"Hash":   b.Hash,
+				"Offset": b.Offset,
+				"Size":   b.Size,
+			}
+		}
+		m["Blocks"] = blocks
+	}
 	return json.Marshal(m)
 }
 

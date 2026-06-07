@@ -1672,6 +1672,18 @@ func (f *sendReceiveFolder) performFinish(file, curFile protocol.FileInfo, hasCu
 			return fmt.Errorf("checking existing file: %w", err)
 		}
 
+		// When archiveMetadataOnly is enabled and the content hasn't actually
+		// changed (same blocks), skip version archiving and update the existing
+		// file in-place instead of replacing it.
+		if f.ArchiveMetadataOnly && hasCurFile && !curFile.IsDirectory() && !curFile.IsSymlink() && curFile.BlocksEqual(file) && !file.InConflictWith(curFile) {
+			if err := f.setPlatformData(&file, file.Name); err != nil {
+				return fmt.Errorf("setting metadata on existing file: %w", err)
+			}
+			f.mtimefs.Chtimes(file.Name, file.ModTime(), file.ModTime()) // never fails
+			dbUpdateChan <- dbUpdateJob{file, dbUpdateShortcutFile}
+			return nil
+		}
+
 		if !curFile.IsDirectory() && !curFile.IsSymlink() && file.InConflictWith(curFile) {
 			// The new file has been changed in conflict with the existing one. We
 			// should file it away as a conflict instead of just removing or
