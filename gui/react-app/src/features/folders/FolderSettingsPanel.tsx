@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CompletionStatus, DeviceConfig, FolderConfig } from "../../api";
+import { folderPathChanged, normalizeFolderPath } from "./folder-editor-utils";
 
 type FolderEditorTab = "general" | "sharing" | "versioning" | "ignores" | "advanced";
 type FolderVersioningSelector = "none" | "trashcan" | "simple" | "staggered" | "external";
@@ -67,6 +68,7 @@ export default function FolderSettingsPanel(props: {
   busy: boolean;
   message: string;
   isNew: boolean;
+  savedPath?: string;
   onDelete?: () => void;
 }) {
   const draft = props.draft;
@@ -125,6 +127,7 @@ export default function FolderSettingsPanel(props: {
   };
   const folderTypeLocked = !props.isNew && draft.type === "receiveencrypted";
   const remoteStateForFolder = (deviceID: string) => props.completions[deviceID]?.[draft.id]?.remoteState;
+  const pathMoved = !props.isNew && folderPathChanged(props.savedPath, draft.path);
 
   return (
     <section className="panel surface workspace-panel">
@@ -181,9 +184,25 @@ export default function FolderSettingsPanel(props: {
             <div className="help-block">文件夹的必填标识符。在所有设备上都必须完全一致，且区分大小写。</div>
           </label>
           <label className="wide-field">
-            <span>文件夹路径</span>
-            <input value={draft.path} disabled={!props.isNew} onChange={(event) => update({ path: event.target.value })} />
-            <div className="help-block">本机上的文件夹路径。如果不存在会自动创建。1. 仅仅写【path】（无论是发送时填写，还是自动接受时的路径）在手机上都不可用，会触发 folder path missing。在电脑上是终端运行syncthing.exe执行的目录 syncthing所在的位置。，如果此文件夹是远端创建的，本机自动接受的。2 当手机上用【~/path】时 ~ 是 /storage/emulated/0/syncthing。如果自动同步到电脑上，则是[path],即少去了~。3 电脑上（~/path）是 用户目录下，比如 C:\Users\18420\path 。</div>
+            <span>本机路径</span>
+            <input
+              value={draft.path}
+              onChange={(event) => update({ path: event.target.value })}
+              placeholder={props.isNew ? "例如 E:\\myserver\\Server_special" : undefined}
+            />
+            {!props.isNew && props.savedPath && (
+              <div className="help-block">当前已保存路径：{normalizeFolderPath(props.savedPath)}</div>
+            )}
+            {pathMoved && (
+              <div className="inline-message warning">
+                这会把同一个文件夹 ID 挂到新路径，索引会保留，不需要删掉重建。请先把原目录整份移过去（含 .stfolder）。如果新路径是空的，可能被当成删除。
+              </div>
+            )}
+            <div className="help-block">
+              {props.isNew
+                ? "本机上的文件夹路径。目录不存在时会自动创建。电脑可用绝对路径或 ~/path（~ 是用户目录）。手机上请用绝对路径或 ~/path（~ 是 /storage/emulated/0/syncthing）。"
+                : "搬家时先移动原目录，再在这里改路径并保存。文件夹 ID 不要改，也不要删除后新建。"}
+            </div>
           </label>
         </div>
       )}

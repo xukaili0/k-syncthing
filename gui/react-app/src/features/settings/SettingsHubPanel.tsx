@@ -1,4 +1,5 @@
-import type { DeviceConfig, FolderConfig, OptionsConfig } from "../../api";
+import type { DeviceConfig, DiscoveryCacheResponse, FolderConfig, OptionsConfig, PendingDevicesResponse } from "../../api";
+import NearbyDevicesPanel from "../devices/NearbyDevicesPanel";
 
 function folderLabel(folder: FolderConfig): string {
   return folder.label && folder.label.trim().length > 0 ? folder.label : folder.id;
@@ -45,6 +46,15 @@ export default function SettingsHubPanel(props: {
   systemActionBusy: "" | "restart" | "shutdown";
   systemActionMessage: string;
   onOpenAdvanced: () => void;
+  discoveryCache?: DiscoveryCacheResponse;
+  pendingDevices?: PendingDevicesResponse;
+  existingDeviceIds?: Set<string>;
+  localDeviceId?: string;
+  onQuickAddDevice?: (deviceID: string, name?: string) => void;
+  onRefreshNearbyDevices?: () => void;
+  nearbyBusy?: boolean;
+  nearbyRefreshBusy?: boolean;
+  nearbyMessage?: string;
 }) {
   const options = props.optionsDraft;
   const update = (patch: Partial<OptionsConfig>) => props.onOptionsChange({ ...(options ?? {}), ...patch });
@@ -83,12 +93,12 @@ export default function SettingsHubPanel(props: {
           <>
             <div className="settings-grid">
               <label>
-                <span>自动升级间隔（小时）</span>
+                <span>自动升级间隔（小时，0 表示关闭）</span>
                 <input
                   type="number"
                   min={0}
                   value={options.autoUpgradeIntervalH ?? 0}
-                  onChange={(event) => update({ autoUpgradeIntervalH: Number(event.target.value) || 0 })}
+                  onChange={(event) => update({ autoUpgradeIntervalH: Number(event.target.value) || 0, upgradeToPreReleases: Number(event.target.value) > 0 ? options.upgradeToPreReleases : false })}
                 />
               </label>
               <label>
@@ -192,12 +202,42 @@ export default function SettingsHubPanel(props: {
                 />
                 <span>启动时打开浏览器</span>
               </label>
+              <label className="toggle-card">
+                <input
+                  type="checkbox"
+                  checked={(options.autoUpgradeIntervalH ?? 0) > 0}
+                  onChange={(event) =>
+                    update({
+                      autoUpgradeIntervalH: event.target.checked ? 12 : 0,
+                      upgradeToPreReleases: event.target.checked ? Boolean(options.upgradeToPreReleases) : false,
+                    })
+                  }
+                />
+                <span>自动升级到官方 Syncthing</span>
+              </label>
+            </div>
+            <div className="device-meta">
+              自动升级默认关闭。开启后会按上面的间隔下载官方发布包，并可能覆盖当前定制版本。
             </div>
           </>
         ) : (
           <div className="empty-mini">正在读取全局设置。</div>
         )}
       </div>
+
+      {props.onQuickAddDevice && (
+        <NearbyDevicesPanel
+          discoveryCache={props.discoveryCache ?? {}}
+          pendingDevices={props.pendingDevices ?? {}}
+          existingDeviceIds={props.existingDeviceIds ?? new Set()}
+          localDeviceId={props.localDeviceId}
+          onAdd={props.onQuickAddDevice}
+          onRefresh={props.onRefreshNearbyDevices}
+          busy={props.nearbyBusy}
+          refreshBusy={props.nearbyRefreshBusy}
+          message={props.nearbyMessage}
+        />
+      )}
 
       <div className="panel surface">
         <div className="panel-header">

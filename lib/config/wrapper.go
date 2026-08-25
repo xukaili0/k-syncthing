@@ -167,7 +167,15 @@ func Load(path string, myID protocol.DeviceID, evLogger events.Logger) (Wrapper,
 	}
 	defer fd.Close()
 
-	cfg, originalVersion, err := ReadXML(fd, myID)
+	var (
+		cfg             Configuration
+		originalVersion int
+	)
+	if IsYAMLPath(path) {
+		cfg, originalVersion, err = ReadYAML(fd, myID)
+	} else {
+		cfg, originalVersion, err = ReadXML(fd, myID)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
@@ -511,8 +519,14 @@ func (w *wrapper) Save() error {
 		return err
 	}
 
-	if err := w.cfg.WriteXML(osutil.LineEndingsWriter(fd)); err != nil {
-		l.Debugln("WriteXML:", err)
+	writer := osutil.LineEndingsWriter(fd)
+	if IsYAMLPath(w.path) {
+		err = w.cfg.WriteYAML(writer)
+	} else {
+		err = w.cfg.WriteXML(writer)
+	}
+	if err != nil {
+		l.Debugln("write config:", err)
 		fd.Close()
 		return err
 	}

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { CompletionStatus, DeviceConfig, DiscoveryCacheResponse, FolderConfig, PendingDevicesResponse } from "../../api";
 import DiscoveredDevicesList from "./DiscoveredDevicesList";
+import { shortDeviceID } from "./discovered-devices";
 
 export type DeviceShareDraft = {
   selected: Record<string, boolean>;
@@ -37,6 +38,7 @@ export default function DeviceSettingsPanel(props: {
   discoveryCache?: DiscoveryCacheResponse;
   pendingDevices?: PendingDevicesResponse;
   existingDeviceIds?: Set<string>;
+  localDeviceId?: string;
 }) {
   const draft = props.draft;
   const update = (patch: Partial<DeviceConfig>) => props.onChange({ ...draft, ...patch });
@@ -130,7 +132,7 @@ export default function DeviceSettingsPanel(props: {
               <span>设备 ID</span>
               <input value={draft.deviceID} disabled={!props.isNew} onChange={(event) => update({ deviceID: event.target.value })} />
               {props.isNew ? (
-                <div className="help-block">在另一台设备的"操作 &gt; 显示 ID"中可以找到要输入的设备 ID。添加新设备时，别忘了另一端也需要添加当前设备。</div>
+                <div className="help-block">一般不用手抄完整 ID。等下面出现附近设备后点添加；也可以粘贴设备 ID。</div>
               ) : null}
             </label>
             <label>
@@ -149,7 +151,14 @@ export default function DeviceSettingsPanel(props: {
               discoveryCache={props.discoveryCache ?? {}}
               pendingDevices={props.pendingDevices ?? {}}
               existingDeviceIds={props.existingDeviceIds ?? new Set()}
-              onSelectDevice={(deviceID) => update({ deviceID })}
+              localDeviceId={props.localDeviceId}
+              onSelectDevice={(deviceID, name) =>
+                update({
+                  deviceID,
+                  name: name && name !== shortDeviceID(deviceID) ? name : draft.name,
+                })
+              }
+              showWhenEmpty
             />
           )}
         </div>

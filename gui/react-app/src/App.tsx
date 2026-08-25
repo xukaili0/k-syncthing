@@ -332,7 +332,7 @@ function App() {
     return mode === "desktop";
   });
   const [mainRefreshSeconds, setMainRefreshSeconds] = useState(readStoredSeconds(MAIN_REFRESH_KEY, 5));
-  const [panelRefreshSeconds, setPanelRefreshSeconds] = useState(readStoredSeconds(PANEL_REFRESH_KEY, 3));
+  const [panelRefreshSeconds, setPanelRefreshSeconds] = useState(readStoredSeconds(PANEL_REFRESH_KEY, 15));
   const [bootBusy, setBootBusy] = useState(false);
   const [bootError, setBootError] = useState("");
   const [overviewMessage, setOverviewMessage] = useState("");
@@ -395,6 +395,7 @@ function App() {
   );
 
   const allDevices = config?.devices ?? [];
+  const existingDeviceIds = useMemo(() => new Set(allDevices.map((device) => device.deviceID)), [allDevices]);
   const loadBootstrap = useCallback(async () => {
     if (!authenticated) {
       return;
@@ -668,6 +669,9 @@ function App() {
     newDeviceBusy,
     discoveryCache,
     pendingDevicesList,
+    nearbyAddBusy,
+    nearbyAddMessage,
+    nearbyRefreshBusy,
     editingExistingDevice,
     editingNewDevice,
     editingExistingFolder,
@@ -693,6 +697,8 @@ function App() {
     deleteCurrentDevice,
     createFolder,
     createDevice,
+    quickAddNearbyDevice,
+    refreshNearbyDevicesNow,
     saveNewFolder,
     saveNewDevice,
     acceptPendingFolder,
@@ -1029,6 +1035,14 @@ function App() {
         loadBootstrap={loadBootstrap}
         bootBusy={bootBusy}
         openDeviceEditor={openDeviceEditor}
+        discoveryCache={discoveryCache}
+        pendingDevices={pendingDevicesList}
+        existingDeviceIds={existingDeviceIds}
+        onQuickAddDevice={(deviceID, name) => void quickAddNearbyDevice(deviceID, name)}
+        onRefreshNearbyDevices={() => void refreshNearbyDevicesNow()}
+        nearbyBusy={nearbyAddBusy}
+        nearbyRefreshBusy={nearbyRefreshBusy}
+        nearbyMessage={nearbyAddMessage}
       />
 
       <main className="workspace-main">
@@ -1097,7 +1111,7 @@ function App() {
         ) : !selectedFolder ? (
           <section className="panel surface">
             <h3>没有可用文件夹</h3>
-            <p>当前配置里没有共享文件夹。React 工作台目前围绕文件夹差异、接收审核和发布审核展开，所以需要至少一个已配置文件夹。</p>
+            <p>当前配置里没有共享文件夹。可以先在左侧添加局域网设备，再新增文件夹并勾选共享。</p>
           </section>
         ) : (
           <>
@@ -1231,6 +1245,15 @@ function App() {
               setSettingsModalOpen(false);
               void loadAdvancedConfig();
             }}
+            discoveryCache={discoveryCache}
+            pendingDevices={pendingDevicesList}
+            existingDeviceIds={existingDeviceIds}
+            localDeviceId={system?.myID}
+            onQuickAddDevice={(deviceID, name) => void quickAddNearbyDevice(deviceID, name)}
+            onRefreshNearbyDevices={() => void refreshNearbyDevicesNow()}
+            nearbyBusy={nearbyAddBusy}
+            nearbyRefreshBusy={nearbyRefreshBusy}
+            nearbyMessage={nearbyAddMessage}
           />
         </ModalShell>
       )}
@@ -1274,6 +1297,7 @@ function App() {
             busy={folderSaveBusy}
             message={folderSaveMessage}
             isNew={editingNewFolder}
+            savedPath={editingExistingFolder ? selectedFolder?.path : undefined}
             onDelete={editingExistingFolder ? () => void deleteCurrentFolder() : undefined}
           />
         </ModalShell>
@@ -1300,7 +1324,8 @@ function App() {
             onDelete={editingExistingDevice ? () => void deleteCurrentDevice() : undefined}
             discoveryCache={discoveryCache}
             pendingDevices={pendingDevicesList}
-            existingDeviceIds={new Set(config?.devices?.map((d) => d.deviceID) ?? [])}
+            existingDeviceIds={existingDeviceIds}
+            localDeviceId={system?.myID}
           />
         </ModalShell>
       )}

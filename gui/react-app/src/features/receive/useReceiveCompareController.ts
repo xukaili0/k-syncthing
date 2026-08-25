@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { getJSON, postJSON, triggerFolderScan, type CompareEntry, type CompareResult, type FolderConfig } from "../../api";
 import { compareRequestView, isPausedFolder } from "../../components/review/review-formatters";
+import { useReviewAutoRefresh } from "../../hooks/useReviewAutoRefresh";
 
 type PanelScanBusy = "" | "compare" | "bidiff" | "peerdiff" | "publish";
 
@@ -29,13 +30,15 @@ export function useReceiveCompareController({
   const [compareIgnoreModTime, setCompareIgnoreModTime] = useState(true);
   const [compareSelection, setCompareSelection] = useState<Record<string, boolean>>({});
   const [compareMessage, setCompareMessage] = useState("");
+  const folderId = selectedFolder?.id ?? "";
+  const folderPaused = isPausedFolder(selectedFolder);
 
   const loadCompare = useCallback(async () => {
-    if (!selectedFolder || !selectedDeviceId) {
+    if (!folderId || !selectedDeviceId) {
       setCompare(null);
       return;
     }
-    if (isPausedFolder(selectedFolder)) {
+    if (folderPaused) {
       setCompare(null);
       setCompareError("当前文件夹已暂停，请先恢复后再进行接收审核。");
       return;
@@ -46,7 +49,7 @@ export function useReceiveCompareController({
     try {
       const requestView = compareRequestView(compareView);
       const data = await getJSON<CompareResult>(
-        `/rest/db/compare?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(comparePrefix)}&page=1&perpage=5000${compareIgnoreModTime ? "&ignoreModTime=true" : ""}`,
+        `/rest/db/compare?folder=${encodeURIComponent(folderId)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(comparePrefix)}&page=1&perpage=5000${compareIgnoreModTime ? "&ignoreModTime=true" : ""}`,
       );
       setCompare(data);
       setCompareSelection((previous) => {
@@ -63,13 +66,13 @@ export function useReceiveCompareController({
     } finally {
       setCompareBusy(false);
     }
-  }, [comparePrefix, compareView, compareIgnoreModTime, selectedDeviceId, selectedFolder]);
+  }, [comparePrefix, compareView, compareIgnoreModTime, folderId, folderPaused, selectedDeviceId]);
 
   const refreshCompare = useCallback(async (rescanLocal: boolean) => {
-    if (!selectedFolder) {
+    if (!folderId) {
       return;
     }
-    if (isPausedFolder(selectedFolder)) {
+    if (folderPaused) {
       setCompare(null);
       setCompareError("当前文件夹已暂停，请先恢复后再进行接收审核。");
       return;
@@ -77,24 +80,22 @@ export function useReceiveCompareController({
     if (rescanLocal) {
       setPanelScanBusy("compare");
       try {
-        await triggerFolderScan(selectedFolder.id);
+        await triggerFolderScan(folderId);
       } finally {
         setPanelScanBusy("");
       }
     }
     await loadCompare();
-  }, [loadCompare, selectedFolder]);
+  }, [folderId, folderPaused, loadCompare, setPanelScanBusy]);
 
-  useEffect(() => {
-    if (!receiveModalOpen || !selectedFolder || !selectedDeviceId) {
-      return;
-    }
-    void refreshCompare(true);
-    const handle = window.setInterval(() => {
-      void refreshCompare(!selectedFolder.fsWatcherEnabled);
-    }, panelRefreshSeconds * 1000);
-    return () => window.clearInterval(handle);
-  }, [panelRefreshSeconds, receiveModalOpen, refreshCompare, selectedDeviceId, selectedFolder]);
+  const initialRefresh = useCallback(() => refreshCompare(true), [refreshCompare]);
+  const intervalRefresh = useCallback(() => refreshCompare(false), [refreshCompare]);
+  useReviewAutoRefresh({
+    enabled: receiveModalOpen && Boolean(folderId) && Boolean(selectedDeviceId),
+    intervalSeconds: panelRefreshSeconds,
+    onInitialRefresh: initialRefresh,
+    onIntervalRefresh: intervalRefresh,
+  });
 
   const compareVisibleEntries = useMemo(
     () => (compare?.entries ?? []).filter((entry) => entry.canPrioritize),

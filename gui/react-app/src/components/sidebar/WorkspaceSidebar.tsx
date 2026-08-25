@@ -1,5 +1,6 @@
 import type { Dispatch, SetStateAction } from "react";
-import type { CompletionStatus, ConnectionsResponse, DeviceConfig, DeviceStatistics, FolderConfig, FolderStatus, SystemStatus, VersionResponse } from "../../api";
+import type { CompletionStatus, ConnectionsResponse, DeviceConfig, DeviceStatistics, DiscoveryCacheResponse, FolderConfig, FolderStatus, PendingDevicesResponse, SystemStatus, VersionResponse } from "../../api";
+import NearbyDevicesPanel from "../../features/devices/NearbyDevicesPanel";
 import { connectionBadgeLabel, connectionBadgeTone, deviceName, folderLabel, folderStateTone, formatBinary, formatLastSeen, formatRate, remoteStateLabel } from "../review/review-formatters";
 import { aggregateDeviceCompletion, aggregateSyncStatusLabel, compressionLabel, normalizeAddress, yesNo } from "./sidebar-utils";
 
@@ -25,6 +26,14 @@ type WorkspaceSidebarProps = {
   loadBootstrap: () => Promise<void>;
   bootBusy: boolean;
   openDeviceEditor: (device: DeviceConfig) => void;
+  discoveryCache: DiscoveryCacheResponse;
+  pendingDevices: PendingDevicesResponse;
+  existingDeviceIds: Set<string>;
+  onQuickAddDevice: (deviceID: string, name?: string) => void;
+  onRefreshNearbyDevices: () => void;
+  nearbyBusy?: boolean;
+  nearbyRefreshBusy?: boolean;
+  nearbyMessage?: string;
 };
 
 const refreshChoices = [2, 3, 5, 10, 15, 30];
@@ -52,6 +61,14 @@ export default function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     loadBootstrap,
     bootBusy,
     openDeviceEditor,
+    discoveryCache,
+    pendingDevices,
+    existingDeviceIds,
+    onQuickAddDevice,
+    onRefreshNearbyDevices,
+    nearbyBusy,
+    nearbyRefreshBusy,
+    nearbyMessage,
   } = props;
   const localDeviceId = system?.myID;
   const remoteDevices = allDevices.filter((device) => device.deviceID !== localDeviceId);
@@ -115,7 +132,20 @@ export default function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           )}
         </div>
       </section>
-    
+
+      <NearbyDevicesPanel
+        compact
+        discoveryCache={discoveryCache}
+        pendingDevices={pendingDevices}
+        existingDeviceIds={existingDeviceIds}
+        localDeviceId={localDeviceId}
+        onAdd={onQuickAddDevice}
+        onRefresh={onRefreshNearbyDevices}
+        busy={nearbyBusy}
+        refreshBusy={nearbyRefreshBusy}
+        message={nearbyMessage}
+      />
+
       <section className="device-list">
         <div className="section-title">远端设备</div>
         {remoteDevices.length === 0 ? (

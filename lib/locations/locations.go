@@ -48,11 +48,18 @@ const (
 	// User's home directory, *not* --home flag
 	UserHomeBaseDir BaseDirEnum = "userHome"
 
-	levelDBDir          = "index-v0.14.0.db"
-	databaseName        = "index-v2"
-	configFileName      = "config.xml"
-	defaultStateDir     = ".local/state/syncthing"
-	oldDefaultConfigDir = ".config/syncthing"
+	levelDBDir           = "index-v0.14.0.db"
+	databaseName         = "index-v2"
+	xmlConfigFileName    = "config.xml"
+	yamlConfigFileName   = "config.yaml"
+	appDirName           = "SyncthingDev"
+	appDirNameUnix       = "syncthing-dev"
+	legacyAppDirName     = "Syncthing"
+	legacyAppDirNameUnix = "syncthing"
+	defaultStateDir      = ".local/state/" + appDirNameUnix
+	oldDefaultConfigDir  = ".config/" + appDirNameUnix
+	legacyUnixStateDir   = ".local/state/" + legacyAppDirNameUnix
+	legacyUnixConfigDir  = ".config/" + legacyAppDirNameUnix
 )
 
 // Platform dependent directories
@@ -116,7 +123,7 @@ func GetBaseDir(baseDir BaseDirEnum) string {
 
 // Use the variables from baseDirs here
 var locationTemplates = map[LocationEnum]string{
-	ConfigFile:     "${config}/config.xml",
+	ConfigFile:     "${config}/" + yamlConfigFileName,
 	CertFile:       "${config}/cert.pem",
 	KeyFile:        "${config}/key.pem",
 	HTTPSCertFile:  "${config}/https-cert.pem",
@@ -148,8 +155,28 @@ func expandLocations() error {
 		}
 		newLocations[key] = filepath.Clean(dir)
 	}
+	newLocations[ConfigFile] = resolveConfigFile(baseDirs[ConfigBaseDir])
 	locations = newLocations
 	return nil
+}
+
+func resolveConfigFile(configDir string) string {
+	yamlPath := filepath.Join(configDir, yamlConfigFileName)
+	xmlPath := filepath.Join(configDir, xmlConfigFileName)
+	if build.IsAndroid {
+		return xmlPath
+	}
+	if fileExists(yamlPath) {
+		return yamlPath
+	}
+	if fileExists(xmlPath) {
+		return xmlPath
+	}
+	return yamlPath
+}
+
+func configExistsIn(dir string, exists func(string) bool) bool {
+	return exists(filepath.Join(dir, yamlConfigFileName)) || exists(filepath.Join(dir, xmlConfigFileName))
 }
 
 // ListExpandedPaths returns a machine-readable mapping of the currently configured locations.
@@ -204,14 +231,18 @@ func defaultDataDir(userHome, configDir string) string {
 }
 
 func windowsConfigDataDir() string {
+	return filepath.Join(windowsAppDataRoot(), appDirName)
+}
+
+func windowsAppDataRoot() string {
 	if p := os.Getenv("LocalAppData"); p != "" {
-		return filepath.Join(p, "Syncthing")
+		return p
 	}
-	return filepath.Join(os.Getenv("AppData"), "Syncthing")
+	return os.Getenv("AppData")
 }
 
 func darwinConfigDataDir(userHome string) string {
-	return filepath.Join(userHome, "Library/Application Support/Syncthing")
+	return filepath.Join(userHome, "Library/Application Support", appDirName)
 }
 
 func unixConfigDir(userHome, xdgConfigHome, xdgStateHome string, fileExists func(string) bool) string {
@@ -220,21 +251,21 @@ func unixConfigDir(userHome, xdgConfigHome, xdgStateHome string, fileExists func
 	// ignored, but that's not what we did previously, so we retain the
 	// old behavior.
 	if xdgConfigHome != "" {
-		candidate := filepath.Join(xdgConfigHome, "syncthing")
-		if fileExists(filepath.Join(candidate, configFileName)) {
+		candidate := filepath.Join(xdgConfigHome, appDirNameUnix)
+		if configExistsIn(candidate, fileExists) {
 			return candidate
 		}
 	}
 
-	// Legacy: if our config exists under ~/.config/syncthing, use that
+	// Legacy: if our config exists under ~/.config/syncthing-dev, use that
 	candidate := filepath.Join(userHome, oldDefaultConfigDir)
-	if fileExists(filepath.Join(candidate, configFileName)) {
+	if configExistsIn(candidate, fileExists) {
 		return candidate
 	}
 
 	// If XDG_STATE_HOME is set to an absolute path, use that
 	if filepath.IsAbs(xdgStateHome) {
-		return filepath.Join(xdgStateHome, "syncthing")
+		return filepath.Join(xdgStateHome, appDirNameUnix)
 	}
 
 	// Use our default
@@ -256,14 +287,14 @@ func unixDataDir(userHome, configDir, xdgDataHome, xdgStateHome string, fileExis
 	// that. The variable should be set to an absolute path or be ignored,
 	// but that's not what we did previously, so we retain the old behavior.
 	if xdgDataHome != "" {
-		candidate := filepath.Join(xdgDataHome, "syncthing")
+		candidate := filepath.Join(xdgDataHome, appDirNameUnix)
 		if fileExists(filepath.Join(candidate, databaseName)) ||
 			fileExists(filepath.Join(candidate, levelDBDir)) {
 			return candidate
 		}
 	}
 
-	// Legacy: if a database exists under ~/.config/syncthing, use that
+	// Legacy: if a database exists under ~/.config/syncthing-dev, use that
 	candidate := filepath.Join(userHome, oldDefaultConfigDir)
 	if fileExists(filepath.Join(candidate, databaseName)) ||
 		fileExists(filepath.Join(candidate, levelDBDir)) {
@@ -272,7 +303,7 @@ func unixDataDir(userHome, configDir, xdgDataHome, xdgStateHome string, fileExis
 
 	// If XDG_STATE_HOME is set to an absolute path, use that
 	if filepath.IsAbs(xdgStateHome) {
-		return filepath.Join(xdgStateHome, "syncthing")
+		return filepath.Join(xdgStateHome, appDirNameUnix)
 	}
 
 	// Use our default

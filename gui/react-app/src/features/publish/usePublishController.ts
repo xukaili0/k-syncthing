@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { getJSON, postJSON, triggerFolderScan, type FolderConfig, type PendingPublishEntry, type PendingPublishResult } from "../../api";
 import { isPausedFolder } from "../../components/review/review-formatters";
+import { useReviewAutoRefresh } from "../../hooks/useReviewAutoRefresh";
 
 type PanelScanBusy = "" | "compare" | "bidiff" | "peerdiff" | "publish";
 
@@ -26,12 +27,15 @@ export function usePublishController({
   const [publishPrefix, setPublishPrefix] = useState("");
   const [publishSelection, setPublishSelection] = useState<Record<string, boolean>>({});
   const [publishMessage, setPublishMessage] = useState("");
+  const folderId = selectedFolder?.id ?? "";
+  const folderPaused = isPausedFolder(selectedFolder);
+
   const loadPublish = useCallback(async () => {
-    if (!selectedFolder) {
+    if (!folderId) {
       setPublish(null);
       return;
     }
-    if (isPausedFolder(selectedFolder)) {
+    if (folderPaused) {
       setPublish(null);
       setPublishError("当前文件夹已暂停，请先恢复后再进行发布审核。");
       return;
@@ -41,7 +45,7 @@ export function usePublishController({
     setPublishError("");
     try {
       const data = await getJSON<PendingPublishResult>(
-        `/rest/db/pendingpublish?folder=${encodeURIComponent(selectedFolder.id)}&view=${encodeURIComponent(publishView)}&prefix=${encodeURIComponent(publishPrefix)}&page=1&perpage=5000`,
+        `/rest/db/pendingpublish?folder=${encodeURIComponent(folderId)}&view=${encodeURIComponent(publishView)}&prefix=${encodeURIComponent(publishPrefix)}&page=1&perpage=5000`,
       );
       setPublish(data);
       setPublishSelection((previous) => {
@@ -58,13 +62,13 @@ export function usePublishController({
     } finally {
       setPublishBusy(false);
     }
-  }, [publishPrefix, publishView, selectedFolder]);
+  }, [folderId, folderPaused, publishPrefix, publishView]);
 
   const refreshPublish = useCallback(async (rescanLocal: boolean) => {
-    if (!selectedFolder) {
+    if (!folderId) {
       return;
     }
-    if (isPausedFolder(selectedFolder)) {
+    if (folderPaused) {
       setPublish(null);
       setPublishError("当前文件夹已暂停，请先恢复后再进行发布审核。");
       return;
@@ -72,24 +76,22 @@ export function usePublishController({
     if (rescanLocal) {
       setPanelScanBusy("publish");
       try {
-        await triggerFolderScan(selectedFolder.id);
+        await triggerFolderScan(folderId);
       } finally {
         setPanelScanBusy("");
       }
     }
     await loadPublish();
-  }, [loadPublish, selectedFolder]);
+  }, [folderId, folderPaused, loadPublish, setPanelScanBusy]);
 
-  useEffect(() => {
-    if (!publishModalOpen || !selectedFolder) {
-      return;
-    }
-    void refreshPublish(true);
-    const handle = window.setInterval(() => {
-      void refreshPublish(!selectedFolder.fsWatcherEnabled);
-    }, panelRefreshSeconds * 1000);
-    return () => window.clearInterval(handle);
-  }, [panelRefreshSeconds, publishModalOpen, refreshPublish, selectedFolder]);
+  const initialRefresh = useCallback(() => refreshPublish(true), [refreshPublish]);
+  const intervalRefresh = useCallback(() => refreshPublish(false), [refreshPublish]);
+  useReviewAutoRefresh({
+    enabled: publishModalOpen && Boolean(folderId),
+    intervalSeconds: panelRefreshSeconds,
+    onInitialRefresh: initialRefresh,
+    onIntervalRefresh: intervalRefresh,
+  });
 
   const publishVisibleEntries = useMemo(
     () => (publish?.entries ?? []).filter((entry) => entry.canPublish),

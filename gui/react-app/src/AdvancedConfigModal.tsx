@@ -11,6 +11,7 @@ import {
   setConfigValue,
   validateAdvancedConfig,
 } from "./advanced-config-model";
+import PerformanceSettingsPanel from "./features/settings/PerformanceSettingsPanel";
 
 type ConfigPath = Array<string | number>;
 
@@ -361,6 +362,10 @@ export default function AdvancedConfigModal(props: AdvancedConfigModalProps) {
       ))}
 
       <div className="advanced-config-sections">
+        <Section title="性能优化" subtitle="集中调整扫描、磁盘、并发和连接参数" open>
+          <PerformanceSettingsPanel config={props.config} onChange={props.onChange} />
+        </Section>
+
         <Section title="GUI" subtitle="Web 管理界面、认证与安全" open>
           <ConfigObjectFields
             group="gui"

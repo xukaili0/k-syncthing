@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -114,7 +115,37 @@ func LoadConfigAtStartup(path string, cert tls.Certificate, evLogger events.Logg
 		}
 	}
 
+	cfg, err = migrateConfigToYAML(cfg, myID, evLogger)
+	if err != nil {
+		return nil, fmt.Errorf("config format migration: %w", err)
+	}
+
 	return cfg, nil
+}
+
+func migrateConfigToYAML(cfg config.Wrapper, myID protocol.DeviceID, evLogger events.Logger) (config.Wrapper, error) {
+	if build.IsAndroid {
+		return cfg, nil
+	}
+	path := cfg.ConfigPath()
+	if config.IsYAMLPath(path) {
+		return cfg, nil
+	}
+	yamlPath := filepath.Join(filepath.Dir(path), "config.yaml")
+	migrated := config.Wrap(yamlPath, cfg.RawCopy(), myID, evLogger)
+	if err := migrated.Save(); err != nil {
+		return nil, err
+	}
+	backup := path + ".bak"
+	if err := os.Rename(path, backup); err != nil && !os.IsNotExist(err) {
+		slog.Warn("Wrote YAML config, but could not rename the old XML file", "from", path, "to", backup, slogutil.Error(err))
+	} else {
+		slog.Info("Migrated configuration from XML to YAML", "from", path, "to", yamlPath)
+	}
+	if err := locations.Set(locations.ConfigFile, yamlPath); err != nil {
+		slog.Warn("Updated YAML config path could not be recorded", slogutil.Error(err))
+	}
+	return migrated, nil
 }
 
 func archiveAndSaveConfig(cfg config.Wrapper, originalVersion int) error {

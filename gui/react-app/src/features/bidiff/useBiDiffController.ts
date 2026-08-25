@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getJSON, postJSON, triggerFolderScan, type BiDiffEntry, type BiDiffResult, type CompletionStatus, type FolderConfig } from "../../api";
 import { bidiffRequestView, isPausedFolder } from "../../components/review/review-formatters";
+import { useReviewAutoRefresh } from "../../hooks/useReviewAutoRefresh";
 import { bidiffTaskKey, type BiDiffTask, type BiDiffTaskStatus } from "./bidiff-model";
 
 type PanelScanBusy = "" | "compare" | "bidiff" | "peerdiff" | "publish";
@@ -53,13 +54,15 @@ export function useBiDiffController({
   const [peerDiffTasks, setPeerDiffTasks] = useState<Record<string, BiDiffTask>>({});
   const [peerDiffAutoRefreshPaused, setPeerDiffAutoRefreshPaused] = useState(false);
   const [peerWorkbenchView, setPeerWorkbenchView] = useState<"diff" | "transfer">("diff");
+  const folderId = selectedFolder?.id ?? "";
+  const folderPaused = isPausedFolder(selectedFolder);
 
   const loadBiDiff = useCallback(async () => {
-    if (!selectedFolder || !selectedDeviceId) {
+    if (!folderId || !selectedDeviceId) {
       setBiDiff(null);
       return;
     }
-    if (isPausedFolder(selectedFolder)) {
+    if (folderPaused) {
       setBiDiff(null);
       setBiDiffError("当前文件夹已暂停，请先恢复后再进行双向接发。");
       return;
@@ -70,7 +73,7 @@ export function useBiDiffController({
     try {
       const requestView = bidiffRequestView(bidiffView);
       const data = await getJSON<BiDiffResult>(
-        `/rest/db/bidiff?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(bidiffPrefix)}&page=1&perpage=5000${bidiffIgnoreModTime ? "&ignoreModTime=true" : ""}`,
+        `/rest/db/bidiff?folder=${encodeURIComponent(folderId)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(bidiffPrefix)}&page=1&perpage=5000${bidiffIgnoreModTime ? "&ignoreModTime=true" : ""}`,
       );
       setBiDiff(data);
       setBiDiffSelection((previous) => {
@@ -87,13 +90,13 @@ export function useBiDiffController({
     } finally {
       setBiDiffBusy(false);
     }
-  }, [bidiffPrefix, bidiffView, bidiffIgnoreModTime, selectedDeviceId, selectedFolder]);
+  }, [bidiffIgnoreModTime, bidiffPrefix, bidiffView, folderId, folderPaused, selectedDeviceId]);
 
   const refreshBiDiff = useCallback(async (rescanLocal: boolean) => {
-    if (!selectedFolder) {
+    if (!folderId) {
       return;
     }
-    if (isPausedFolder(selectedFolder)) {
+    if (folderPaused) {
       setBiDiff(null);
       setBiDiffError("当前文件夹已暂停，请先恢复后再进行双向接发。");
       return;
@@ -101,20 +104,20 @@ export function useBiDiffController({
     if (rescanLocal) {
       setPanelScanBusy("bidiff");
       try {
-        await triggerFolderScan(selectedFolder.id);
+        await triggerFolderScan(folderId);
       } finally {
         setPanelScanBusy("");
       }
     }
     await loadBiDiff();
-  }, [loadBiDiff, selectedFolder]);
+  }, [folderId, folderPaused, loadBiDiff, setPanelScanBusy]);
 
   const loadPeerDiff = useCallback(async () => {
-    if (!selectedFolder || !selectedDeviceId) {
+    if (!folderId || !selectedDeviceId) {
       setPeerDiff(null);
       return;
     }
-    if (isPausedFolder(selectedFolder)) {
+    if (folderPaused) {
       setPeerDiff(null);
       setPeerDiffError("当前文件夹已暂停，请先恢复后再查看直传差异。");
       return;
@@ -125,7 +128,7 @@ export function useBiDiffController({
     try {
       const requestView = bidiffRequestView(peerDiffView);
       const data = await getJSON<BiDiffResult>(
-        `/rest/db/peerdiff?folder=${encodeURIComponent(selectedFolder.id)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(peerDiffPrefix)}&page=1&perpage=5000${peerDiffIgnoreModTime ? "&ignoreModTime=true" : ""}`,
+        `/rest/db/peerdiff?folder=${encodeURIComponent(folderId)}&device=${encodeURIComponent(selectedDeviceId)}&view=${encodeURIComponent(requestView)}&prefix=${encodeURIComponent(peerDiffPrefix)}&page=1&perpage=5000${peerDiffIgnoreModTime ? "&ignoreModTime=true" : ""}`,
       );
       setPeerDiff(data);
       setPeerDiffSelection((previous) => {
@@ -142,13 +145,13 @@ export function useBiDiffController({
     } finally {
       setPeerDiffBusy(false);
     }
-  }, [peerDiffPrefix, peerDiffView, peerDiffIgnoreModTime, selectedDeviceId, selectedFolder]);
+  }, [folderId, folderPaused, peerDiffIgnoreModTime, peerDiffPrefix, peerDiffView, selectedDeviceId]);
 
   const refreshPeerDiff = useCallback(async (rescanLocal: boolean) => {
-    if (!selectedFolder) {
+    if (!folderId) {
       return;
     }
-    if (isPausedFolder(selectedFolder)) {
+    if (folderPaused) {
       setPeerDiff(null);
       setPeerDiffError("当前文件夹已暂停，请先恢复后再查看直传差异。");
       return;
@@ -156,41 +159,33 @@ export function useBiDiffController({
     if (rescanLocal) {
       setPanelScanBusy("peerdiff");
       try {
-        await triggerFolderScan(selectedFolder.id);
+        await triggerFolderScan(folderId);
       } finally {
         setPanelScanBusy("");
       }
     }
     await loadPeerDiff();
-  }, [loadPeerDiff, selectedFolder]);
+  }, [folderId, folderPaused, loadPeerDiff, setPanelScanBusy]);
 
-  useEffect(() => {
-    if (!bidiffModalOpen || !selectedFolder || !selectedDeviceId) {
-      return;
-    }
-    void refreshBiDiff(true);
-    if (bidiffAutoRefreshPaused) {
-      return;
-    }
-    const handle = window.setInterval(() => {
-      void refreshBiDiff(!selectedFolder.fsWatcherEnabled);
-    }, panelRefreshSeconds * 1000);
-    return () => window.clearInterval(handle);
-  }, [bidiffAutoRefreshPaused, bidiffModalOpen, panelRefreshSeconds, refreshBiDiff, selectedDeviceId, selectedFolder]);
+  const initialBiDiffRefresh = useCallback(() => refreshBiDiff(true), [refreshBiDiff]);
+  const intervalBiDiffRefresh = useCallback(() => refreshBiDiff(false), [refreshBiDiff]);
+  useReviewAutoRefresh({
+    enabled: bidiffModalOpen && Boolean(folderId) && Boolean(selectedDeviceId),
+    paused: bidiffAutoRefreshPaused,
+    intervalSeconds: panelRefreshSeconds,
+    onInitialRefresh: initialBiDiffRefresh,
+    onIntervalRefresh: intervalBiDiffRefresh,
+  });
 
-  useEffect(() => {
-    if (!peerDiffModalOpen || !selectedFolder || !selectedDeviceId) {
-      return;
-    }
-    void refreshPeerDiff(true);
-    if (peerDiffAutoRefreshPaused) {
-      return;
-    }
-    const handle = window.setInterval(() => {
-      void refreshPeerDiff(!selectedFolder.fsWatcherEnabled);
-    }, panelRefreshSeconds * 1000);
-    return () => window.clearInterval(handle);
-  }, [panelRefreshSeconds, peerDiffAutoRefreshPaused, peerDiffModalOpen, refreshPeerDiff, selectedDeviceId, selectedFolder]);
+  const initialPeerDiffRefresh = useCallback(() => refreshPeerDiff(true), [refreshPeerDiff]);
+  const intervalPeerDiffRefresh = useCallback(() => refreshPeerDiff(false), [refreshPeerDiff]);
+  useReviewAutoRefresh({
+    enabled: peerDiffModalOpen && Boolean(folderId) && Boolean(selectedDeviceId),
+    paused: peerDiffAutoRefreshPaused,
+    intervalSeconds: panelRefreshSeconds,
+    onInitialRefresh: initialPeerDiffRefresh,
+    onIntervalRefresh: intervalPeerDiffRefresh,
+  });
 
   useEffect(() => {
     if (!selectedFolder || !selectedDeviceId) {

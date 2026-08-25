@@ -62,8 +62,44 @@ export function prepareFolderDraft(folder: FolderConfig): FolderConfig {
   return next;
 }
 
+export function normalizeFolderPath(path: string | undefined): string {
+  let next = (path ?? "").trim();
+  if (next.length > 3 && /[\\/]$/.test(next)) {
+    next = next.replace(/[\\/]+$/, "");
+  }
+  return next;
+}
+
+export function comparableFolderPath(path: string | undefined): string {
+  const next = normalizeFolderPath(path);
+  if (/^[a-zA-Z]:[\\/]/.test(next) || next.includes("\\")) {
+    return next.toLowerCase();
+  }
+  return next;
+}
+
+export function folderPathChanged(from: string | undefined, to: string | undefined): boolean {
+  return comparableFolderPath(from) !== comparableFolderPath(to);
+}
+
+export function folderPathMoveConfirmText(from: string | undefined, to: string | undefined): string {
+  return [
+    "将把本机路径从：",
+    normalizeFolderPath(from) || "（空）",
+    "改为：",
+    normalizeFolderPath(to) || "（空）",
+    "",
+    "请先把原目录整份移到新路径（含 .stfolder）。文件夹 ID 和索引会保留，不会重建数据库。",
+    "如果新路径是空的，或不是原来的内容，可能被当成删除并同步到其他设备。",
+    "不要删除这个文件夹再新建。",
+    "",
+    "确认保存新路径？",
+  ].join("\n");
+}
+
 export function buildFolderPayload(folder: FolderConfig): FolderConfig {
   const payload = cloneJSON(folder);
+  payload.path = normalizeFolderPath(payload.path);
   if (!canReceive(payload)) {
     payload.manualSync = false;
   }

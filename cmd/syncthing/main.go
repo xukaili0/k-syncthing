@@ -144,7 +144,20 @@ type CLI struct {
 func (c *CLI) AfterApply() error {
 	// Executed after parsing command line options but before running actual
 	// subcommands
-	return setConfigDataLocationsFromFlags(c.HomeDir, c.ConfDir, c.DataDir)
+	if err := setConfigDataLocationsFromFlags(c.HomeDir, c.ConfDir, c.DataDir); err != nil {
+		return err
+	}
+	if c.HomeDir != "" || c.ConfDir != "" || c.DataDir != "" {
+		return nil
+	}
+	from, to, err := locations.MigrateLegacyHomeDir()
+	if err != nil {
+		return fmt.Errorf("moving existing Syncthing home directory: %w", err)
+	}
+	if from != "" {
+		slog.Info("Moved existing configuration and database out of the official Syncthing directory", "from", from, "to", to)
+	}
+	return nil
 }
 
 // serveCmd are the options for the `syncthing serve` command.
@@ -791,6 +804,8 @@ func cleanConfigDirectory() {
 		"audit-*.log":               7 * 24 * time.Hour,  // keep audit logs for a week
 		"index-v0.14.0.db-migrated": 14 * 24 * time.Hour, // keep old index format for two weeks
 		"config.xml.v*":             30 * 24 * time.Hour, // old config versions for a month
+		"config.yaml.v*":            30 * 24 * time.Hour,
+		"config.xml.bak":            30 * 24 * time.Hour,
 		"support-bundle-*":          30 * 24 * time.Hour, // keep old support bundle zip or folder for a month
 	}
 

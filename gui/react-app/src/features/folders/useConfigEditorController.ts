@@ -1,8 +1,9 @@
-import { useCallback, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { deleteJSON, getJSON, postJSON, putJSON, type DeviceConfig, type DiscoveryCacheResponse, type FolderConfig, type IgnoreResponse, type PendingDevicesResponse, type PendingFoldersResponse } from "../../api";
 import { deviceName, folderLabel } from "../../components/review/review-formatters";
+import { shortDeviceID } from "../devices/discovered-devices";
 import type { DeviceShareDraft } from "../devices/DeviceSettingsPanel";
-import { buildFolderPayload, normalizeIgnoreText, prepareFolderDraft } from "./folder-editor-utils";
+import { buildFolderPayload, folderPathChanged, folderPathMoveConfirmText, normalizeFolderPath, normalizeIgnoreText, prepareFolderDraft } from "./folder-editor-utils";
 
 type ConfigEditorControllerOptions = {
   folders: FolderConfig[];
@@ -50,6 +51,9 @@ export function useConfigEditorController({
 
   const [discoveryCache, setDiscoveryCache] = useState<DiscoveryCacheResponse>({});
   const [pendingDevicesList, setPendingDevicesList] = useState<PendingDevicesResponse>({});
+  const [nearbyAddBusy, setNearbyAddBusy] = useState(false);
+  const [nearbyAddMessage, setNearbyAddMessage] = useState("");
+  const [nearbyRefreshBusy, setNearbyRefreshBusy] = useState(false);
 
   const editingDevice = useMemo(
     () => allDevices.find((device) => device.deviceID === deviceEditorId) ?? null,
@@ -185,15 +189,27 @@ export function useConfigEditorController({
     if (!selectedFolder || !folderDraft) {
       return;
     }
+    const nextPath = normalizeFolderPath(folderDraft.path);
+    if (!nextPath) {
+      setFolderSaveMessage("文件夹路径不能为空。");
+      return;
+    }
+    if (folderPathChanged(selectedFolder.path, nextPath) && !window.confirm(folderPathMoveConfirmText(selectedFolder.path, nextPath))) {
+      return;
+    }
     setFolderSaveBusy(true);
     setFolderSaveMessage("");
     try {
-      const payload = buildFolderPayload(folderDraft);
+      const payload = buildFolderPayload({ ...folderDraft, path: nextPath });
+      const moved = folderPathChanged(selectedFolder.path, nextPath);
       await putJSON(`/rest/config/folders/${encodeURIComponent(selectedFolder.id)}`, payload);
       await postJSON(`/rest/db/ignores?folder=${encodeURIComponent(selectedFolder.id)}`, {
         ignore: normalizeIgnoreText(folderIgnoreText).split("\n"),
       });
-      setFolderSaveMessage("文件夹设置已保存。");
+      setFolderSaveMessage(moved ? "已切换到新路径。文件夹 ID 和索引已保留。" : "文件夹设置已保存。");
+      if (moved) {
+        setOverviewMessage(`已将"${folderLabel(selectedFolder)}"切换到 ${nextPath}。文件夹 ID 和索引已保留。`);
+      }
       await loadBootstrap();
       closeFolderEditor();
     } catch (error) {
@@ -285,6 +301,84 @@ export function useConfigEditorController({
     }
   };
 
+  const refreshNearbyDevices = useCallback(async () => {
+    const [discovery, pending] = await Promise.all([
+      getJSON<DiscoveryCacheResponse>("/rest/system/discovery").catch(() => ({})),
+      getJSON<PendingDevicesResponse>("/rest/cluster/pending/devices").catch(() => ({})),
+    ]);
+    setDiscoveryCache(discovery);
+    setPendingDevicesList(pending);
+  }, []);
+
+  const refreshNearbyDevicesNow = async () => {
+    setNearbyRefreshBusy(true);
+    try {
+      await refreshNearbyDevices();
+    } finally {
+      setNearbyRefreshBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    let running = false;
+    const run = async () => {
+      if (cancelled || running || document.visibilityState === "hidden") {
+        return;
+      }
+      running = true;
+      try {
+        await refreshNearbyDevices();
+      } finally {
+        running = false;
+      }
+    };
+    void run();
+    const handle = window.setInterval(() => {
+      void run();
+    }, 5000);
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void run();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      cancelled = true;
+      window.clearInterval(handle);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [refreshNearbyDevices]);
+
+  const quickAddNearbyDevice = async (deviceID: string, name?: string) => {
+    const alreadyAdded = allDevices.some((device) => device.deviceID === deviceID);
+    if (alreadyAdded) {
+      setNearbyAddMessage("这台设备已经添加过了。");
+      return;
+    }
+    setNearbyAddBusy(true);
+    setNearbyAddMessage("");
+    try {
+      const defaults = await getJSON<DeviceConfig>("/rest/config/defaults/device");
+      const payload: DeviceConfig = {
+        ...cloneJSON(defaults),
+        deviceID,
+        name: name?.trim() && name !== shortDeviceID(deviceID) ? name.trim() : "",
+        addresses: defaults.addresses?.length ? defaults.addresses : ["dynamic"],
+      };
+      await postJSON("/rest/config/devices", payload);
+      await loadBootstrap();
+      await refreshNearbyDevices();
+      const shownName = payload.name || shortDeviceID(deviceID);
+      setNearbyAddMessage(`已添加 ${shownName}。请到另一台设备左侧「附近设备」点「接受」；没有出现就点刷新。`);
+      setOverviewMessage(`已添加设备 ${shownName}。请到另一台设备左侧「附近设备」点「接受」；没有出现就点刷新。`);
+    } catch (error) {
+      setNearbyAddMessage(error instanceof Error ? error.message : "添加附近设备失败");
+    } finally {
+      setNearbyAddBusy(false);
+    }
+  };
+
   const createDevice = async () => {
     setNewDeviceBusy(true);
     setOptionsSaveMessage("");
@@ -315,6 +409,10 @@ export function useConfigEditorController({
 
   const saveNewFolder = async () => {
     if (!folderDraft) {
+      return;
+    }
+    if (!normalizeFolderPath(folderDraft.path)) {
+      setFolderSaveMessage("文件夹路径不能为空。");
       return;
     }
     setFolderSaveBusy(true);
@@ -420,6 +518,9 @@ export function useConfigEditorController({
       newDeviceBusy,
       discoveryCache,
       pendingDevicesList,
+      nearbyAddBusy,
+      nearbyAddMessage,
+      nearbyRefreshBusy,
       editingExistingDevice,
       editingNewDevice,
       editingExistingFolder,
@@ -446,6 +547,8 @@ export function useConfigEditorController({
       deleteCurrentDevice,
       createFolder,
       createDevice,
+      quickAddNearbyDevice,
+      refreshNearbyDevicesNow,
       saveNewFolder,
       saveNewDevice,
       acceptPendingFolder,

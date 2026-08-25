@@ -30,6 +30,7 @@ import (
 // put the newest on top for readability.
 var (
 	migrations = migrationSet{
+		{53, migrateToConfigV53},
 		{52, migrateToConfigV52},
 		{51, migrateToConfigV51},
 		{50, migrateToConfigV50},
@@ -100,6 +101,15 @@ func (m migration) apply(cfg *Configuration) {
 		m.convert(cfg)
 	}
 	cfg.Version = m.targetVersion
+}
+
+func migrateToConfigV53(cfg *Configuration) {
+	// Previous default was 12 hours, which downloads official Syncthing
+	// binaries and can replace this custom build. Keep explicitly chosen
+	// non-default intervals, but turn the old default off.
+	if cfg.Options.AutoUpgradeIntervalH == 12 {
+		cfg.Options.AutoUpgradeIntervalH = 0
+	}
 }
 
 func migrateToConfigV52(cfg *Configuration) {

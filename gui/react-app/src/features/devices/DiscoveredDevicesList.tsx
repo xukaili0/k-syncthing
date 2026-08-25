@@ -1,72 +1,70 @@
 import { useMemo } from "react";
 import type { DiscoveryCacheResponse, PendingDevicesResponse } from "../../api";
+import { formatFullDeviceID, listNearbyDevices } from "./discovered-devices";
 
 export default function DiscoveredDevicesList(props: {
   discoveryCache: DiscoveryCacheResponse;
   pendingDevices: PendingDevicesResponse;
   existingDeviceIds: Set<string>;
-  onSelectDevice: (deviceID: string) => void;
+  localDeviceId?: string;
+  onSelectDevice: (deviceID: string, name?: string) => void;
+  showWhenEmpty?: boolean;
+  emptyText?: string;
+  compact?: boolean;
 }) {
-  const { discoveryCache, pendingDevices, existingDeviceIds, onSelectDevice } = props;
-
-  // Filter out already configured devices
-  const pendingEntries = useMemo(
-    () =>
-      Object.entries(pendingDevices)
-        .filter(([id]) => !existingDeviceIds.has(id))
-        .sort((a, b) => new Date(b[1].time).getTime() - new Date(a[1].time).getTime()),
-    [pendingDevices, existingDeviceIds],
+  const nearby = useMemo(
+    () => listNearbyDevices(props.discoveryCache, props.pendingDevices, props.existingDeviceIds, props.localDeviceId),
+    [props.discoveryCache, props.pendingDevices, props.existingDeviceIds, props.localDeviceId],
   );
 
-  const discoveredEntries = useMemo(
-    () =>
-      Object.entries(discoveryCache)
-        .filter(([id]) => !existingDeviceIds.has(id) && !pendingDevices[id])
-        .filter(([, entry]) => entry.addresses && entry.addresses.length > 0)
-        .sort((a, b) => a[0].localeCompare(b[0])),
-    [discoveryCache, existingDeviceIds, pendingDevices],
-  );
-
-  const hasEntries = pendingEntries.length > 0 || discoveredEntries.length > 0;
-
-  if (!hasEntries) {
-    return null;
+  if (nearby.length === 0) {
+    if (!props.showWhenEmpty) {
+      return null;
+    }
+    return (
+      <div className="discovered-devices-section">
+        <div className="empty-mini">
+          {props.emptyText ?? "局域网里还没看到其他设备。确认另一台已经打开本程序，两边都启用了本地发现，并等几秒。"}
+        </div>
+      </div>
+    );
   }
+
+  const pending = nearby.filter((item) => item.kind === "pending");
+  const discovered = nearby.filter((item) => item.kind === "discovered");
 
   return (
     <div className="discovered-devices-section">
-      <div className="section-title">已发现的设备</div>
-      <div className="help-block">以下设备在局域网或全局发现中被检测到，点击即可快速添加。</div>
-
-      {pendingEntries.length > 0 && (
+      {pending.length > 0 && (
         <div className="discovered-device-group">
-          <div className="group-title">待处理设备（曾尝试连接）</div>
-          {pendingEntries.map(([deviceID, entry]) => (
-            <div key={deviceID} className="discovered-device-card pending">
+          <div className="group-title">对方已添加你，点接受即可</div>
+          {pending.map((item) => (
+            <div key={item.deviceID} className="discovered-device-card pending">
               <div className="discovered-device-info">
-                <div className="device-name">{entry.name || "未知设备"}</div>
-                <div className="device-address">{entry.address}</div>
-                <div className="device-id">{formatDeviceID(deviceID)}</div>
+                <div className="device-name">{item.name}</div>
+                {item.address ? <div className="device-address">{item.address}</div> : null}
+                {props.compact ? null : <div className="device-id">{formatFullDeviceID(item.deviceID)}</div>}
               </div>
-              <button className="primary-button small-button" onClick={() => onSelectDevice(deviceID)}>
-                添加此设备
+              <button className="primary-button small-button" onClick={() => props.onSelectDevice(item.deviceID, item.name)}>
+                接受
               </button>
             </div>
           ))}
         </div>
       )}
 
-      {discoveredEntries.length > 0 && (
+      {discovered.length > 0 && (
         <div className="discovered-device-group">
-          <div className="group-title">局域网/全局发现的设备</div>
-          {discoveredEntries.map(([deviceID, entry]) => (
-            <div key={deviceID} className="discovered-device-card">
+          <div className="group-title">局域网里看到的设备</div>
+          {discovered.map((item) => (
+            <div key={item.deviceID} className="discovered-device-card">
               <div className="discovered-device-info">
-                <div className="device-id">{formatDeviceID(deviceID)}</div>
-                <div className="device-address">{entry.addresses.join(", ")}</div>
+                <div className="device-name">{item.name}</div>
+                {item.address ? <div className="device-address">{item.address}</div> : null}
+                {props.compact ? null : <div className="device-id">{formatFullDeviceID(item.deviceID)}</div>}
               </div>
-              <button className="ghost-button small-button" onClick={() => onSelectDevice(deviceID)}>
-                选择
+              <button className="primary-button small-button" onClick={() => props.onSelectDevice(item.deviceID, item.name)}>
+                添加
               </button>
             </div>
           ))}
@@ -74,13 +72,4 @@ export default function DiscoveredDevicesList(props: {
       )}
     </div>
   );
-}
-
-function formatDeviceID(id: string): string {
-  // Format device ID with dashes for readability: XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX
-  const clean = id.replace(/-/g, "");
-  if (clean.length === 56) {
-    return clean.match(/.{4}/g)?.join("-") ?? id;
-  }
-  return id;
 }
