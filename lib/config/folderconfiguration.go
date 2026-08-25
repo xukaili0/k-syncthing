@@ -73,8 +73,8 @@ type FolderConfiguration struct {
 	MaxConflicts            int                         `json:"maxConflicts" xml:"maxConflicts" default:"10"`
 	DisableSparseFiles      bool                        `json:"disableSparseFiles" xml:"disableSparseFiles"`
 	Paused                  bool                        `json:"paused" xml:"paused"`
-	ManualSync              bool                        `json:"manualSync" xml:"manualSync"`
-	ManualPublish           bool                        `json:"manualPublish" xml:"manualPublish"`
+	ManualSync              bool                        `json:"manualSync" xml:"manualSync" default:"true"`
+	ManualPublish           bool                        `json:"manualPublish" xml:"manualPublish" default:"true"`
 	MarkerName              string                      `json:"markerName" xml:"markerName"`
 	CopyOwnershipFromParent bool                        `json:"copyOwnershipFromParent" xml:"copyOwnershipFromParent"`
 	RawModTimeWindowS       int                         `json:"modTimeWindowS" xml:"modTimeWindowS"`

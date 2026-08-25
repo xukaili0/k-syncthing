@@ -7,6 +7,7 @@
 package api
 
 import (
+	"archive/zip"
 	"bytes"
 	"cmp"
 	"context"
@@ -289,6 +290,8 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/loglevels", s.getSystemDebug)           // -
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/log", s.getSystemLog)                   // [since]
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/log.txt", s.getSystemLogTxt)            // [since]
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/identity/export", s.exportIdentity)     // - (download cert+key as zip)
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/identity/info", s.getIdentityInfo)      // - (get device ID and cert paths)
 
 	// The POST handlers
 	restMux.HandlerFunc(http.MethodPost, "/rest/db/prio", s.postDBPrio)                               // folder file
@@ -313,6 +316,7 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodPost, "/rest/system/pause", s.makeDevicePauseHandler(true))        // [device]
 	restMux.HandlerFunc(http.MethodPost, "/rest/system/resume", s.makeDevicePauseHandler(false))      // [device]
 	restMux.HandlerFunc(http.MethodPost, "/rest/system/loglevels", s.postSystemDebug)                 // [enable] [disable]
+	restMux.HandlerFunc(http.MethodPost, "/rest/system/identity/import", s.importIdentity)            // <body> (upload cert+key zip)
 
 	// The DELETE handlers
 	restMux.HandlerFunc(http.MethodDelete, "/rest/cluster/pending/devices", s.deletePendingDevices) // device
@@ -2362,6 +2366,197 @@ func addressIsLocalhost(addr string) bool {
 		}
 		return ip.IsLoopback()
 	}
+}
+
+// exportIdentity exports the device identity (cert.pem and key.pem) as a zip file.
+func (s *service) exportIdentity(w http.ResponseWriter, _ *http.Request) {
+	certFile := locations.Get(locations.CertFile)
+	keyFile := locations.Get(locations.KeyFile)
+
+	// Check if files exist
+	if _, err := os.Stat(certFile); os.IsNotExist(err) {
+		http.Error(w, "Certificate file not found", http.StatusNotFound)
+		return
+	}
+	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
+		http.Error(w, "Key file not found", http.StatusNotFound)
+		return
+	}
+
+	// Create zip in memory
+	buf := new(bytes.Buffer)
+	zipWriter := zip.NewWriter(buf)
+
+	// Add cert.pem
+	certData, err := os.ReadFile(certFile)
+	if err != nil {
+		http.Error(w, "Failed to read certificate", http.StatusInternalServerError)
+		return
+	}
+	certEntry, err := zipWriter.Create("cert.pem")
+	if err != nil {
+		http.Error(w, "Failed to create zip entry", http.StatusInternalServerError)
+		return
+	}
+	if _, err := certEntry.Write(certData); err != nil {
+		http.Error(w, "Failed to write certificate", http.StatusInternalServerError)
+		return
+	}
+
+	// Add key.pem
+	keyData, err := os.ReadFile(keyFile)
+	if err != nil {
+		http.Error(w, "Failed to read key", http.StatusInternalServerError)
+		return
+	}
+	keyEntry, err := zipWriter.Create("key.pem")
+	if err != nil {
+		http.Error(w, "Failed to create zip entry", http.StatusInternalServerError)
+		return
+	}
+	if _, err := keyEntry.Write(keyData); err != nil {
+		http.Error(w, "Failed to write key", http.StatusInternalServerError)
+		return
+	}
+
+	if err := zipWriter.Close(); err != nil {
+		http.Error(w, "Failed to close zip", http.StatusInternalServerError)
+		return
+	}
+
+	// Set headers for download
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", "attachment; filename=syncthing-identity.zip")
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+	w.Write(buf.Bytes())
+}
+
+// getIdentityInfo returns information about the device identity.
+func (s *service) getIdentityInfo(w http.ResponseWriter, _ *http.Request) {
+	certFile := locations.Get(locations.CertFile)
+	keyFile := locations.Get(locations.KeyFile)
+
+	info := map[string]interface{}{
+		"deviceID":    s.id.String(),
+		"deviceIDShort": s.id.Short().String(),
+		"certFile":    certFile,
+		"keyFile":     keyFile,
+		"certExists":  false,
+		"keyExists":   false,
+	}
+
+	if _, err := os.Stat(certFile); err == nil {
+		info["certExists"] = true
+	}
+	if _, err := os.Stat(keyFile); err == nil {
+		info["keyExists"] = true
+	}
+
+	sendJSON(w, info)
+}
+
+// importIdentity imports the device identity from an uploaded zip file.
+func (s *service) importIdentity(w http.ResponseWriter, r *http.Request) {
+	// Parse multipart form (max 10MB)
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		http.Error(w, "Failed to parse upload", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("identity")
+	if err != nil {
+		http.Error(w, "Missing identity file", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Validate filename
+	if header.Filename != "syncthing-identity.zip" {
+		http.Error(w, "Invalid filename", http.StatusBadRequest)
+		return
+	}
+
+	// Read zip file
+	zipData, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "Failed to read upload", http.StatusInternalServerError)
+		return
+	}
+
+	zipReader, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
+	if err != nil {
+		http.Error(w, "Invalid zip file", http.StatusBadRequest)
+		return
+	}
+
+	// Extract cert.pem and key.pem
+	var certData, keyData []byte
+	for _, f := range zipReader.File {
+		switch f.Name {
+		case "cert.pem":
+			rc, err := f.Open()
+			if err != nil {
+				http.Error(w, "Failed to read cert.pem from zip", http.StatusInternalServerError)
+				return
+			}
+			certData, err = io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				http.Error(w, "Failed to read cert.pem", http.StatusInternalServerError)
+				return
+			}
+		case "key.pem":
+			rc, err := f.Open()
+			if err != nil {
+				http.Error(w, "Failed to read key.pem from zip", http.StatusInternalServerError)
+				return
+			}
+			keyData, err = io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				http.Error(w, "Failed to read key.pem", http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
+	if certData == nil || keyData == nil {
+		http.Error(w, "ZIP must contain both cert.pem and key.pem", http.StatusBadRequest)
+		return
+	}
+
+	// Validate that cert and key match
+	_, err = tls.X509KeyPair(certData, keyData)
+	if err != nil {
+		http.Error(w, "Certificate and key do not match", http.StatusBadRequest)
+		return
+	}
+
+	// Backup existing files
+	certFile := locations.Get(locations.CertFile)
+	keyFile := locations.Get(locations.KeyFile)
+
+	if _, err := os.Stat(certFile); err == nil {
+		os.Rename(certFile, certFile+".backup")
+	}
+	if _, err := os.Stat(keyFile); err == nil {
+		os.Rename(keyFile, keyFile+".backup")
+	}
+
+	// Write new files
+	if err := os.WriteFile(certFile, certData, 0600); err != nil {
+		http.Error(w, "Failed to write certificate", http.StatusInternalServerError)
+		return
+	}
+	if err := os.WriteFile(keyFile, keyData, 0600); err != nil {
+		http.Error(w, "Failed to write key", http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]interface{}{
+		"success": true,
+		"message": "Identity imported successfully. Please restart Syncthing for changes to take effect.",
+	})
 }
 
 // shouldRegenerateCertificate checks for certificate expiry or other known

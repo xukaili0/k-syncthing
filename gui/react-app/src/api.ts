@@ -28,18 +28,33 @@ export type GuiVersioningDraft = {
 export type FolderConfig = {
   id: string;
   label?: string;
+  filesystemType?: string;
   path: string;
   type: string;
   paused?: boolean;
   rescanIntervalS?: number;
   fsWatcherEnabled?: boolean;
   fsWatcherDelayS?: number;
+  fsWatcherTimeoutS?: number;
   ignorePerms?: boolean;
   autoNormalize?: boolean;
   ignoreDelete?: boolean;
   order?: string;
+  blockPullOrder?: string;
+  copyRangeMethod?: string;
+  copiers?: number;
+  pullerMaxPendingKiB?: number;
+  hashers?: number;
+  pullerPauseS?: number;
+  pullerDelayS?: number;
+  maxConcurrentWrites?: number;
+  modTimeWindowS?: number;
   maxConflicts?: number;
   scanProgressIntervalS?: number;
+  disableSparseFiles?: boolean;
+  disableFsync?: boolean;
+  markerName?: string;
+  caseSensitiveFS?: boolean;
   minDiskFree?: MinDiskFree;
   manualSync?: boolean;
   manualPublish?: boolean;
@@ -55,7 +70,7 @@ export type FolderConfig = {
   devices: FolderDevice[];
   _guiVersioning?: GuiVersioningDraft;
   _addIgnores?: boolean;
-};
+} & Record<string, unknown>;
 
 export type DeviceConfig = {
   deviceID: string;
@@ -76,7 +91,7 @@ export type DeviceConfig = {
   remoteGUIPort?: number;
   numConnections?: number;
   ignoredFolders?: ObservedFolder[];
-};
+} & Record<string, unknown>;
 
 export type ObservedDevice = {
   time: string;
@@ -117,26 +132,40 @@ export type GuiConfig = {
   apiKey?: string;
   insecureAdminAccess?: boolean;
   theme?: string;
-  insecureSkipHostCheck?: boolean;
+  insecureSkipHostcheck?: boolean;
   insecureAllowFrameLoading?: boolean;
   sendBasicAuthPrompt?: boolean;
-};
+} & Record<string, unknown>;
 
 export type LDAPConfig = {
   address?: string;
   bindDN?: string;
-  transport?: number;
+  transport?: "plain" | "tls" | "starttls";
   insecureSkipVerify?: boolean;
   searchBaseDN?: string;
   searchFilter?: string;
-};
+} & Record<string, unknown>;
+
+export type DefaultIgnoresConfig = {
+  lines: string[];
+} & Record<string, unknown>;
+
+export type DefaultsConfig = {
+  folder: FolderConfig;
+  device: DeviceConfig;
+  ignores: DefaultIgnoresConfig;
+} & Record<string, unknown>;
 
 export type ConfigResponse = {
+  version: number;
   folders: FolderConfig[];
   devices: DeviceConfig[];
   gui: GuiConfig;
+  ldap: LDAPConfig;
+  options: OptionsConfig;
+  defaults: DefaultsConfig;
   remoteIgnoredDevices?: ObservedDevice[];
-};
+} & Record<string, unknown>;
 
 export type SystemStatus = {
   myID: string;
@@ -343,6 +372,7 @@ export type OptionsConfig = {
   natRenewalMinutes?: number;
   natTimeoutSeconds?: number;
   urAccepted?: number;
+  urSeen?: number;
   urUniqueId?: string;
   urURL?: string;
   urPostInsecurely?: boolean;
@@ -360,6 +390,8 @@ export type OptionsConfig = {
   tempIndexMinBlocks?: number;
   setLowPriority?: boolean;
   maxFolderConcurrency?: number;
+  maxConcurrentIncomingRequestKiB?: number;
+  crURL?: string;
   crashReportingEnabled?: boolean;
   stunKeepaliveStartS?: number;
   stunKeepaliveMinS?: number;
@@ -367,10 +399,18 @@ export type OptionsConfig = {
   announceLANAddresses?: boolean;
   sendFullIndexOnUpgrade?: boolean;
   featureFlags?: string[];
+  auditEnabled?: boolean;
+  auditFile?: string;
   connectionLimitEnough?: number;
   connectionLimitMax?: number;
-  unackedNotificationID?: string;
-};
+  connectionPriorityTcpLan?: number;
+  connectionPriorityQuicLan?: number;
+  connectionPriorityTcpWan?: number;
+  connectionPriorityQuicWan?: number;
+  connectionPriorityRelay?: number;
+  connectionPriorityUpgradeThreshold?: number;
+  unackedNotificationIDs?: string[];
+} & Record<string, unknown>;
 
 export type IgnoreResponse = {
   ignore: string[];
@@ -566,4 +606,54 @@ export async function triggerFolderScan(folder: string, subs?: string[], next?: 
     const text = await response.text();
     throw new Error(text || `HTTP ${response.status}`);
   }
+}
+
+export type IdentityInfo = {
+  deviceID: string;
+  deviceIDShort: string;
+  certFile: string;
+  keyFile: string;
+  certExists: boolean;
+  keyExists: boolean;
+};
+
+export type ImportIdentityResponse = {
+  success: boolean;
+  message: string;
+};
+
+export async function getIdentityInfo(): Promise<IdentityInfo> {
+  return parseResponse<IdentityInfo>(
+    await fetch("/rest/system/identity/info", {
+      credentials: "same-origin",
+      headers: buildHeaders(false),
+    }),
+  );
+}
+
+export async function exportIdentity(): Promise<Blob> {
+  const response = await fetch("/rest/system/identity/export", {
+    credentials: "same-origin",
+    headers: buildHeaders(false),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+
+  return response.blob();
+}
+
+export async function importIdentity(file: File): Promise<ImportIdentityResponse> {
+  const formData = new FormData();
+  formData.append("identity", file);
+
+  const response = await fetch("/rest/system/identity/import", {
+    method: "POST",
+    credentials: "same-origin",
+    body: formData,
+  });
+
+  return parseResponse<ImportIdentityResponse>(response);
 }
