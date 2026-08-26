@@ -1108,11 +1108,6 @@ function App() {
               </button>
             </div>
           </section>
-        ) : !selectedFolder ? (
-          <section className="panel surface">
-            <h3>没有可用文件夹</h3>
-            <p>当前配置里没有共享文件夹。可以先在左侧添加局域网设备，再新增文件夹并勾选共享。</p>
-          </section>
         ) : (
           <>
             {Object.keys(pendingFolders).length > 0 && (
@@ -1124,7 +1119,7 @@ function App() {
                   </div>
                 </div>
                 <div className="help-block">
-                  如果你希望某台远端设备以后共享的新文件夹自动落到当前设备，可在"编辑设备 &gt; 共享"中开启"自动接受"。
+                  本机当前即使还没有文件夹，也可以直接接受对方共享过来的文件夹。如果你希望某台远端设备以后共享的新文件夹自动落到当前设备，可在"编辑设备 &gt; 共享"中开启"自动接受"。
                 </div>
                 <div className="share-list">
                   {Object.entries(pendingFolders).map(([folderId, pending]) => {
@@ -1157,6 +1152,17 @@ function App() {
                 </div>
               </section>
             )}
+            {!selectedFolder ? (
+              <section className="panel surface">
+                <h3>没有可用文件夹</h3>
+                <p>
+                  {Object.keys(pendingFolders).length > 0
+                    ? "本机还没有自己的文件夹。上方就是对方发来的共享邀请，接受后会出现在左侧。"
+                    : "当前配置里没有共享文件夹。可以先在左侧添加局域网设备，再新增文件夹并勾选共享。"}
+                </p>
+              </section>
+            ) : (
+              <>
             {viewMode === "overview" && (
               <OverviewPanel
                 folders={folders}
@@ -1205,6 +1211,8 @@ function App() {
                 onTogglePaused={(folder) => void toggleFolderPaused(folder)}
                 localDeviceId={system?.myID}
               />
+            )}
+              </>
             )}
           </>
         )}

@@ -40,6 +40,38 @@ describe("performance presets", () => {
     expect(original.folders.map((folder) => folder.hashers)).toEqual([1, 2]);
   });
 
+  it("applies the HDD 500 KB preset with a small pull queue and single hasher", () => {
+    const next = applyPerformancePreset(configFixture(), performancePresets.hddSmall500k);
+
+    expect(next.options.maxFolderConcurrency).toBe(1);
+    expect(next.options.setLowPriority).toBe(true);
+    expect(next.folders.every((folder) => folder.hashers === 1 && folder.copiers === 1)).toBe(true);
+    expect(next.folders.every((folder) => folder.maxConcurrentWrites === 4)).toBe(true);
+    expect(next.folders.every((folder) => folder.pullerMaxPendingKiB === 8192)).toBe(true);
+    expect(next.folders.every((folder) => folder.scanProgressIntervalS === 0)).toBe(true);
+    expect(next.folders.every((folder) => folder.disableFsync === false)).toBe(true);
+    expect(next.devices.every((device) => device.numConnections === 3)).toBe(true);
+  });
+
+  it("applies the HDD 10 MB preset with a medium pull queue", () => {
+    const next = applyPerformancePreset(configFixture(), performancePresets.hddMedium10m);
+
+    expect(next.folders.every((folder) => folder.hashers === 1 && folder.copiers === 2)).toBe(true);
+    expect(next.folders.every((folder) => folder.maxConcurrentWrites === 4)).toBe(true);
+    expect(next.folders.every((folder) => folder.pullerMaxPendingKiB === 16384)).toBe(true);
+    expect(next.devices.every((device) => device.numConnections === 3)).toBe(true);
+  });
+
+  it("applies the HDD 200 MB preset with sequential-friendly writes", () => {
+    const next = applyPerformancePreset(configFixture(), performancePresets.hddLarge200m);
+
+    expect(next.folders.every((folder) => folder.hashers === 1 && folder.copiers === 2)).toBe(true);
+    expect(next.folders.every((folder) => folder.maxConcurrentWrites === 2)).toBe(true);
+    expect(next.folders.every((folder) => folder.pullerMaxPendingKiB === 32768)).toBe(true);
+    expect(next.defaults.folder.scanProgressIntervalS).toBe(0);
+    expect(next.devices.every((device) => device.numConnections === 3)).toBe(true);
+  });
+
   it("restores auto/default sentinel values without making writes unlimited", () => {
     const next = applyPerformancePreset(configFixture(), performancePresets.syncthingAuto);
 

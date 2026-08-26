@@ -3572,12 +3572,32 @@ button:disabled {
   color: var(--accent-strong);
   font-size: 0.74rem;
   font-weight: 650;
+  line-height: 1.45;
+}
+
+.performance-preset-value {
+  color: var(--text);
+  font-size: 0.74rem;
+  font-weight: 650;
+  line-height: 1.4;
 }
 
 .performance-description {
   color: var(--muted);
   font-size: 0.76rem;
-  line-height: 1.45;
+  line-height: 1.5;
+}
+
+.performance-hints {
+  margin: 0;
+  padding-left: 1.15em;
+  color: var(--muted);
+  font-size: 0.73rem;
+  line-height: 1.5;
+}
+
+.performance-hints li + li {
+  margin-top: 2px;
 }
 
 .performance-toggle-field .advanced-boolean {
